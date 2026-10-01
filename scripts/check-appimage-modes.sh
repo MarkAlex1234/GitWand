@@ -14,26 +14,36 @@
 # Rule: anything executable by its owner must be executable by others, and
 # every file and directory must be readable by others.
 #
-# Usage:  bash scripts/check-appimage-modes.sh <file.AppImage | extracted-dir>
+# The modes are read from the SquashFS listing (`unsquashfs -lln`), which is
+# what a mount shows. `--appimage-extract` is not used: the extraction is done
+# by the image's own runtime, so the modes it writes are the runtime's, not
+# necessarily the ones stored in the image.
+#
+# Requires squashfs-tools.
+# Usage:  bash scripts/check-appimage-modes.sh <file.AppImage>
 set -euo pipefail
 
-target="${1:?usage: $0 <file.AppImage | extracted-dir>}"
+image="${1:?usage: $0 <file.AppImage>}"
 
-if [ -d "$target" ]; then
-  root="$target"
-else
-  work="$(mktemp -d)"
-  trap 'rm -rf "$work"' EXIT
-  cp "$target" "$work/image.AppImage"
-  chmod +x "$work/image.AppImage"
-  # Extraction keeps the modes stored in the SquashFS, which is what we check.
-  (cd "$work" && ./image.AppImage --appimage-extract >/dev/null)
-  root="$work/squashfs-root"
-fi
+# The image may not be executable yet (e.g. downloaded from an artifact).
+[ -x "$image" ] || chmod +x "$image"
+offset="$("$(realpath "$image")" --appimage-offset)"
 
-bad="$(find "$root" \( -type f -o -type d \) \
-  \( \( -perm -u+x ! -perm -o+x \) -o ! -perm -o+r \) \
-  -printf '%M %P\n')"
+listing="$(unsquashfs -lln -o "$offset" "$image")"
+
+# `-lln` lines: "<mode> <uid>/<gid> <size> <date> <time> squashfs-root/<path>".
+# Symlinks (mode starting with "l") are always 0777 and are skipped.
+bad="$(awk '
+  $1 ~ /^[-d]/ {
+    m = $1
+    owner_x = substr(m, 4, 1) ~ /[xs]/
+    other_r = substr(m, 8, 1) == "r"
+    other_x = substr(m, 10, 1) ~ /[xt]/
+    if ((owner_x && !other_x) || !other_r) {
+      path = $0; sub(/^.*squashfs-root\/?/, "", path)
+      print m, path
+    }
+  }' <<<"$listing")"
 
 if [ -n "$bad" ]; then
   echo "::error::AppImage has owner-only modes; it will not start when another user runs it (e.g. firejail --appimage):"
@@ -41,4 +51,4 @@ if [ -n "$bad" ]; then
   exit 1
 fi
 
-echo "✓ every file in $(basename "$target") is usable by any user"
+echo "✓ every file in $(basename "$image") is usable by any user ($(wc -l <<<"$listing") entries)"
