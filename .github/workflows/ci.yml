@@ -230,6 +230,7 @@ jobs:
                  apps/desktop/src-tauri \
                  pnpm-lock.yaml \
                  'apps/desktop/package.json' \
+                 scripts/check-appimage-modes.sh \
                  .github/workflows/ci.yml | grep -q .; then
               echo "bundle=true" >> "$GITHUB_OUTPUT"
             else
@@ -248,6 +249,7 @@ jobs:
           fi
           if git diff --name-only "$BEFORE" "${{ github.sha }}" -- \
                apps/desktop/src-tauri apps/desktop/src 'apps/desktop/*.json' \
+               scripts/check-appimage-modes.sh \
                .github/workflows/ci.yml | grep -q .; then
             echo "bundle=true" >> "$GITHUB_OUTPUT"
           else
@@ -367,7 +369,8 @@ jobs:
           # `@tauri-apps/cli` 2.11.4 does NOT accept `--profile` as a direct
           # flag of `tauri build` (clap: "unexpected argument '--profile'
           # found ... tip: to pass '--profile' as a value, use '--
-          # --profile'") — confirmed locally against this exact CLI version.
+          # --profile'") — confirmed locally against this exact CLI version,
+          # and still the case in 2.12.0.
           # The leading `--` here is required, not decorative. tauri-action
           # itself scans these args for the literal token `--profile` (see
           # its `src/build.ts`) to locate `target/ci/bundle/...` instead of
@@ -396,6 +399,22 @@ jobs:
             apps/desktop/src-tauri/target/ci/bundle/**/*.deb
             apps/desktop/src-tauri/target/ci/bundle/**/*.AppImage
           if-no-files-found: warn
+
+      # The bundler wrote the AppImage launcher as 0770 up to CLI 2.11.x
+      # (tauri-apps/tauri#16155), so 3.11.1 would not start under
+      # `firejail --appimage` and failed the AppImage catalog test
+      # (appimage.github.io PR #7392). Nothing in the bundler code guarantees
+      # the 2.12 fix, so check the modes of the image we actually built.
+      - name: AppImage modes are usable by any user
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y squashfs-tools
+          shopt -s nullglob globstar
+          images=(apps/desktop/src-tauri/target/ci/bundle/**/*.AppImage)
+          [ ${#images[@]} -gt 0 ] || { echo "::error::no AppImage produced"; exit 1; }
+          for image in "${images[@]}"; do
+            bash scripts/check-appimage-modes.sh "$image"
+          done
 
   # Does the packaged .deb actually start?
   #

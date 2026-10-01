@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The Linux AppImage would not start for a user other than the one who mounted it.** The Tauri bundler stored the launcher, `AppRun.wrapped`, as `0770` (tauri-apps/tauri#16155). A normal start never noticed, but `firejail --appimage`, which mounts the image as root, got `Permission denied`, and so did the AppImage catalog's test (AppImage/appimage.github.io#7392). `@tauri-apps/cli` is now on 2.12, which ships the launcher as `0755`, and the CI bundle build fails if any file in the AppImage is executable or readable by its owner only.
+
 ## [3.11.1] - 2026-09-25
 
 ### Added
