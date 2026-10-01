@@ -46,14 +46,24 @@ fn list_repo_dir(cwd: String, dir: String, include_ignored: bool) -> Result<Repo
 
 - `dir` is repo-relative (`""` for the root) and resolved through `safe_repo_path`. A path escaping the repo is refused.
 - **One level only:** `std::fs::read_dir` on the resolved directory. `.git` is always skipped. Symlinks are reported as `symlink` and not followed.
-- **Ignore classification:** the entries' repo-relative paths are piped NUL-separated into one `git check-ignore -z --stdin` call (args as an array, per AGENTS.md). Verified on 2026-10-01:
-  - it reports ignored files and ignored directories (`node_modules`, `debug.log`);
-  - it does **not** report a tracked file inside an ignored directory, nor an ignored directory that contains tracked files (`build/` holding a force-added file). Both are the semantics the tree needs.
+- **Ignore classification, in process with libgit2** (`git2` 0.20, already a dependency). An entry is ignored when `repo.is_path_ignored(rel)` is true **and** it is not tracked: for a file, `index.get_path(rel, 0)` is `None`; for a directory, `index.find_prefix("<rel>/")` finds nothing. `is_path_ignored` applies the rules regardless of the index, so without this check a force-added file would show as ignored. The repo and its index are opened once per call. Verified on 2026-10-01 against `git check-ignore`, with the same results:
+  - ignored: `node_modules`, `debug.log`, and an untracked file inside an ignored directory;
+  - not ignored: a tracked file inside an ignored directory, and an ignored directory that contains tracked files (`build/` holding a force-added file).
 - `include_ignored = false` drops ignored entries; `true` keeps them with `ignored: true`.
 - Sorted directories first, then case-insensitive by name.
 - **Cap: 5,000 entries per directory**, then `truncated: true`. This keeps the IPC payload well under 1 MB (`apps/desktop/CLAUDE.md`).
-- `git ls-files` is **not** used: limited to a directory by pathspec, it still lists every tracked file below it recursively (verified), so listing the root would list the whole repo.
-- Wiring: wrapper in `backend.ts`, entry in `commandRegistry.ts`, route in `dev-server.mjs` with the same algorithm, and parity coverage in `tests/parity/`.
+- **Measured on 2026-10-01** on a shallow clone of `microsoft/vscode` (19,736 tracked files) with an added 3,000-package `node_modules` and a 6,000-file flat directory (git 2.50.1, Apple Silicon, `read_dir` + classification, median of 7):
+
+| Directory | Entries | libgit2 | `git check-ignore --stdin` | `git ls-files --others --ignored --directory` |
+|---|---|---|---|---|
+| root | 44 | 0.5 ms | ~145 ms | 440 ms |
+| `src/vs/workbench/contrib` | 100 | 2.0 ms | ~93 ms | 117 ms |
+| a 728-file generated dir | 728 | 25 ms | ~219 ms | n/m |
+| `node_modules` (all ignored) | 3,000 | 37 ms | ~818 ms | 49 ms |
+| flat `big/` | 6,000 | 66 ms | ~1,630 ms | 59 ms |
+
+  `check-ignore` costs ~0.27 ms per path, and `ls-files` walks every non-ignored subdirectory (the whole repo from the root). Neither is acceptable on the expand path. `git ls-files --cached` is not used either: limited to a directory, it still lists every tracked file below it recursively.
+- Wiring: wrapper in `backend.ts`, entry in `commandRegistry.ts`, route in `dev-server.mjs` (which has no libgit2: `read_dir` + one `git check-ignore -z --stdin` call, slow but dev-only, with the same results as verified above), and parity coverage in `tests/parity/`.
 - `list_repo_tree` is not changed.
 
 **A second command, `reveal_in_file_manager(cwd, path)`.** Nothing reveals a file in the OS file manager today: `openInEditor` exists (`backend.ts:1503`), but `tauri-plugin-opener` is not installed. The command resolves `path` through `safe_repo_path`, then spawns, with args as an array:
@@ -62,8 +72,6 @@ fn list_repo_dir(cwd: String, dir: String, include_ignored: bool) -> Result<Repo
 - Linux: `xdg-open <parent dir>` (no portable "select" exists).
 
 It gets a dev-server route that logs and does nothing, in the same way as `openInEditor`'s dev fallback, and a registry entry giving the reason it cannot be exercised for real in `dev:web`. It has no parity test, because it has no output.
-
-**Before the plan is finalized:** time `list_repo_dir` on the root and on a large directory of the largest repo in the benchmark corpus, with and without `include_ignored`.
 
 ## 5. Tree model: `useLazyRepoTree`
 
