@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import en from "../../locales/en";
-import type { LazyTreeRow } from "../../composables/useLazyRepoTree";
+import { DIR_ENTRY_CAP, type LazyTreeRow } from "../../composables/useLazyRepoTree";
 
 vi.mock("@tanstack/vue-virtual", async () => {
   const { shallowRef, triggerRef } = await import("vue");
@@ -117,6 +117,16 @@ describe("FileTreePane — ARIA", () => {
     expect(items()[4]!.getAttribute("aria-expanded")).toBe("false");
     expect(items()[3]!.hasAttribute("aria-expanded")).toBe(false);
     expect(items().map((i) => i.getAttribute("aria-level"))).toEqual(["1", "2", "3", "2", "1", "1"]);
+  });
+
+  it("shows the folder badge, the status letter with its screen-reader label, and a truncated notice", async () => {
+    await mount({ rows: [...ROWS, { kind: "truncated", path: "src", name: "", depth: 2 }] });
+    const badge = items()[0]!.querySelector(".ftp__badge");
+    expect(badge?.textContent).toBe("1");
+    expect(badge?.getAttribute("title")).toBe(en.filesView.folderChanges.replace("{0}", "1"));
+    expect(items()[3]!.querySelector(".ftp__status")?.textContent).toBe("M");
+    expect(items()[3]!.querySelector(".ftp__sr")?.textContent).toBe(en.filesView.statusModified);
+    expect(items()[6]!.textContent).toContain(en.filesView.truncated.replace("{0}", DIR_ENTRY_CAP.toLocaleString()));
   });
 
   it("greys out an ignored row", async () => {

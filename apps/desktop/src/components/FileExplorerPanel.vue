@@ -135,6 +135,14 @@ async function onReveal(path: string): Promise<void> {
   }
 }
 
+// The tree's highlight follows the active tab, however it became active.
+watch(
+  () => activeTab.value?.path,
+  (path) => {
+    if (path) tree.selected.value = path;
+  },
+);
+
 function onTabClick(tabId: number) {
   explorer.setActive(props.repoPath, tabId);
 }

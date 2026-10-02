@@ -324,6 +324,7 @@ describe("FileExplorerPanel — tree (v3.11.2)", () => {
     await settle();
     const gone = row("gone.ts");
     expect(gone.classList.contains("ftp__row--deleted")).toBe(true);
+    expect(gone.querySelector(".ftp__sr")?.textContent).toBe(en.filesView.statusDeleted);
     vi.mocked(readFile).mockClear();
     gone.click();
     gone.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
@@ -353,6 +354,43 @@ describe("FileExplorerPanel — tree (v3.11.2)", () => {
     key("Enter");
     await settle();
     expect(useFileExplorer().tabsFor(REPO).map((t) => [t.path, t.pinned])).toEqual([["a.ts", false]]);
+  });
+
+  it("retries a folder that failed to list when its error row is clicked", async () => {
+    vi.mocked(listRepoDir).mockImplementationOnce(async () => ({ entries: FS[""]!, truncated: false }));
+    vi.mocked(listRepoDir).mockRejectedValueOnce(new Error("denied"));
+    mountPanel();
+    await settle();
+    row("lib").click();
+    await settle();
+    const err = rows().find((r) => r.textContent?.includes("denied"))!;
+    expect(err).toBeTruthy();
+    vi.mocked(listRepoDir).mockClear();
+    err.click();
+    await settle();
+    expect(listRepoDir).toHaveBeenCalledWith(REPO, "lib", false);
+    expect(row("c.ts")).toBeTruthy();
+  });
+
+  it("highlights the active tab's file, also when the tab is chosen from the tab bar", async () => {
+    mountPanel();
+    await settle();
+    await openTab("a.ts");
+    await openTab("b.ts");
+    const tabs = useFileExplorer().tabsFor(REPO);
+    useFileExplorer().setActive(REPO, tabs.find((t) => t.path === "a.ts")!.id);
+    await settle();
+    expect(row("a.ts").getAttribute("aria-selected")).toBe("true");
+    expect(row("b.ts").getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("persists the expansion under the panel's own key, not the Files view's", async () => {
+    mountPanel();
+    await settle();
+    row("lib").click();
+    await settle();
+    expect(localStorage.getItem(`gitwand-explorer-tree:${REPO}`)).not.toBeNull();
+    expect(localStorage.getItem(`gitwand-files-view:${REPO}`)).toBeNull();
   });
 
   it("Show ignored re-lists the tree with ignored entries", async () => {
