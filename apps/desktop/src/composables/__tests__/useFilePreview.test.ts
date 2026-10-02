@@ -5,8 +5,9 @@
  * covered by the git-diff and read-file parity suites.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { effectScope, nextTick, ref, type EffectScope, type Ref } from "vue";
+import { effectScope, nextTick, ref, watch, type EffectScope, type Ref } from "vue";
 import {
+  type PreviewBody,
   planPreview,
   decodeText,
   formatBytes,
@@ -230,6 +231,102 @@ describe("useFilePreview — races and refresh", () => {
     vi.advanceTimersByTime(WATCH_DEBOUNCE_MS - 1);
     expect(l.readFile).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(1);
+    expect(l.readFile).toHaveBeenCalledTimes(2);
+  });
+
+  function fakeWatcher() {
+    const handlers = new Set<(ev: RepoChangeEvent) => void>();
+    const watcher: TreeWatcher = {
+      on: (_k, h) => {
+        handlers.add(h);
+        return () => {
+          handlers.delete(h);
+        };
+      },
+    };
+    const emit = (path: string) => handlers.forEach((h) => h({ kinds: ["worktree"], paths: [path], truncated: false }));
+    return { watcher, emit };
+  }
+  /** Every body the composable passes through, synchronously. */
+  function recordBodies(p: { body: Ref<PreviewBody> }): PreviewBody[] {
+    const seen: PreviewBody[] = [];
+    watch(p.body, (b) => seen.push(b), { flush: "sync" });
+    return seen;
+  }
+
+  it("keeps the shown content while a watcher reload of the same file is in flight", async () => {
+    vi.useFakeTimers();
+    const { watcher, emit } = fakeWatcher();
+    const pending: Array<(f: FileAtRevision) => void> = [];
+    const l = loaders({
+      readFile: vi.fn(() => new Promise<FileAtRevision>((r) => pending.push(r))),
+    });
+    const p = run(ref(fileTarget("a.ts", null)), l, watcher);
+    await flush();
+    pending.shift()!(textFile("v1"));
+    await flush();
+    const shown = p.body.value;
+    expect(shown).toEqual({ kind: "text", content: "v1" });
+
+    const seen = recordBodies(p);
+    emit("a.ts");
+    vi.advanceTimersByTime(WATCH_DEBOUNCE_MS);
+    await flush();
+    expect(l.readFile).toHaveBeenCalledTimes(2);
+    expect(p.body.value).toBe(shown);
+    pending.shift()!(textFile("v2"));
+    await flush();
+    expect(p.body.value).toEqual({ kind: "text", content: "v2" });
+    expect(seen.map((b) => b.kind)).toEqual(["text"]);
+  });
+
+  it("keeps the shown diff while a watcher reload of the same diff is in flight", async () => {
+    vi.useFakeTimers();
+    const { watcher, emit } = fakeWatcher();
+    const pending: Array<(d: GitDiff) => void> = [];
+    const l = loaders({ getDiff: vi.fn(() => new Promise<GitDiff>((r) => pending.push(r))) });
+    const p = run(ref(fileTarget("a.ts", st({ unstaged: true }))), l, watcher);
+    await flush();
+    pending.shift()!(DIFF);
+    await flush();
+    const seen = recordBodies(p);
+    emit("a.ts");
+    vi.advanceTimersByTime(WATCH_DEBOUNCE_MS);
+    await flush();
+    expect(p.body.value.kind).toBe("diff");
+    pending.shift()!({ ...DIFF });
+    await flush();
+    expect(seen.every((b) => b.kind === "diff")).toBe(true);
+  });
+
+  it("still shows loading for a new selection", async () => {
+    const l = loaders({
+      readFile: vi.fn((_c: string, path: string) =>
+        path === "a.ts" ? Promise.resolve(textFile("A")) : new Promise<FileAtRevision>(() => {}),
+      ),
+    });
+    const target = ref<PreviewTarget | null>(fileTarget("a.ts", null));
+    const p = run(target, l);
+    await flush();
+    expect(p.body.value).toEqual({ kind: "text", content: "A" });
+    target.value = fileTarget("b.ts", null);
+    await flush();
+    expect(p.body.value).toEqual({ kind: "loading" });
+  });
+
+  it("drops a pending watcher reload of the previous file when the selection changes", async () => {
+    vi.useFakeTimers();
+    const { watcher, emit } = fakeWatcher();
+    const l = loaders();
+    const target = ref<PreviewTarget | null>(fileTarget("a.ts", null));
+    run(target, l, watcher);
+    await flush();
+    emit("a.ts");
+    target.value = fileTarget("b.ts", null);
+    await flush();
+    expect(l.readFile).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(WATCH_DEBOUNCE_MS * 2);
+    await flush();
     expect(l.readFile).toHaveBeenCalledTimes(2);
   });
 });

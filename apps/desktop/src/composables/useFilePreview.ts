@@ -6,8 +6,10 @@
  * through injected loaders and guards against the race that matters while
  * arrowing through the tree: every load carries a request id, and a response
  * for an earlier selection is dropped. It reloads through the watcher when the
- * previewed file changes on disk, and an error is always shown as an error,
- * never as an empty body.
+ * previewed file changes on disk, stale-while-revalidate: a reload of what is
+ * already shown keeps it on screen until the new response lands, so a save in
+ * the editor neither blanks the pane nor scrolls it back to the top. An error
+ * is always shown as an error, never as an empty body.
  */
 import { computed, getCurrentScope, onScopeDispose, ref, shallowRef, watch, type Ref } from "vue";
 import type { FileAtRevision, GitDiff } from "../utils/backend";
@@ -101,6 +103,8 @@ export function useFilePreview(opts: UseFilePreviewOptions) {
   const body = shallowRef<PreviewBody>({ kind: "idle" });
   let requestId = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  /** The load key `body` was produced for; "" while nothing loaded is shown. */
+  let shownKey = "";
 
   const plan = computed<PreviewPlan | null>(() =>
     opts.target.value ? planPreview(opts.target.value, side.value) : null,
@@ -112,53 +116,64 @@ export function useFilePreview(opts: UseFilePreviewOptions) {
     return t && p ? `${opts.cwd.value}\u0000${t.path}\u0000${JSON.stringify(p)}` : "";
   });
 
+  /** Only a settled body counts as "shown": loading or an error never revalidates in place. */
+  function show(next: PreviewBody, key: string): void {
+    body.value = next;
+    shownKey = next.kind === "idle" || next.kind === "loading" || next.kind === "error" ? "" : key;
+  }
+
   async function load(): Promise<void> {
     const id = ++requestId;
+    const key = loadKey.value;
     const t = opts.target.value;
     const p = plan.value;
     if (!t || !p) {
-      body.value = { kind: "idle" };
+      show({ kind: "idle" }, key);
       return;
     }
     if (p.kind === "folder" || p.kind === "conflicted" || p.kind === "symlink") {
-      body.value = { kind: p.kind };
+      show({ kind: p.kind }, key);
       return;
     }
     if (p.kind === "too-large") {
-      body.value = { kind: "placeholder", reason: "too-large", size: p.size };
+      show({ kind: "placeholder", reason: "too-large", size: p.size }, key);
       return;
     }
-    body.value = { kind: "loading" };
+    // Same selection, side and plan as what is on screen: revalidate in place.
+    if (shownKey !== key) show({ kind: "loading" }, key);
+    const commit = (next: PreviewBody) => show(next, key);
     try {
       if (p.kind === "content") {
         const file = await opts.loaders.readFile(opts.cwd.value, t.path);
         if (id !== requestId) return;
         if (file.absent) {
-          body.value = { kind: "gone" };
+          commit({ kind: "gone" });
           return;
         }
         if (file.byteLength > PREVIEW_MAX_BYTES) {
-          body.value = { kind: "placeholder", reason: "too-large", size: file.byteLength };
+          commit({ kind: "placeholder", reason: "too-large", size: file.byteLength });
           return;
         }
         const decoded = decodeText(file.bytesBase64);
-        body.value = decoded.ok
-          ? { kind: "text", content: decoded.text }
-          : { kind: "placeholder", reason: decoded.reason, size: file.byteLength };
+        commit(
+          decoded.ok
+            ? { kind: "text", content: decoded.text }
+            : { kind: "placeholder", reason: decoded.reason, size: file.byteLength },
+        );
         return;
       }
       const diff = await opts.loaders.getDiff(opts.cwd.value, t.path, p.staged);
       if (id !== requestId) return;
       if (diff.truncatedFromBytes) {
-        body.value = { kind: "placeholder", reason: "too-large", size: diff.truncatedFromBytes };
+        commit({ kind: "placeholder", reason: "too-large", size: diff.truncatedFromBytes });
       } else if (diff.hunks.length === 0) {
-        body.value = { kind: "placeholder", reason: "no-text-diff", size: t.kind === "file" ? t.size : 0 };
+        commit({ kind: "placeholder", reason: "no-text-diff", size: t.kind === "file" ? t.size : 0 });
       } else {
-        body.value = { kind: "diff", diff };
+        commit({ kind: "diff", diff });
       }
     } catch (err) {
       if (id !== requestId) return;
-      body.value = { kind: "error", message: err instanceof Error ? err.message : String(err) };
+      commit({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -170,6 +185,11 @@ export function useFilePreview(opts: UseFilePreviewOptions) {
     },
   );
   watch(loadKey, () => void load(), { immediate: true });
+  // A reload queued for the previous file or repo must not fire on the next one.
+  watch([() => opts.cwd.value, () => opts.target.value?.path ?? null], () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  });
 
   const unsubscribe =
     opts.watcher?.on(["worktree", "index"], (ev) => {
