@@ -47,6 +47,17 @@ vi.mock("../../utils/backend", () => ({
     node: { name: "", path: "", isDir: true, children: [] },
     truncated: false,
   })),
+  listRepoDir: vi.fn(async (_cwd: string, dir: string) => ({
+    entries:
+      dir === ""
+        ? [
+            { name: "lib", path: "lib", kind: "dir", ignored: false, size: 0 },
+            { name: "a.ts", path: "a.ts", kind: "file", ignored: false, size: 13 },
+            { name: "b.ts", path: "b.ts", kind: "file", ignored: false, size: 13 },
+          ]
+        : [{ name: "c.ts", path: "lib/c.ts", kind: "file", ignored: false, size: 1 }],
+    truncated: false,
+  })),
   getGitBlame: vi.fn(async () => [
     {
       line: 1,
@@ -64,6 +75,7 @@ import FileExplorerPanel from "../FileExplorerPanel.vue";
 import { useFileExplorer } from "../../composables/useFileExplorer";
 import { loadCodeMirror } from "../../utils/codemirrorLibs";
 import { useTheme } from "../../composables/useTheme";
+import { listRepoDir } from "../../utils/backend";
 
 const REPO = "/repo";
 
@@ -211,5 +223,18 @@ describe("FileExplorerPanel — editor wiring", () => {
 
     expect(editorDoc()).toBe(before);
     expect(container.querySelector(".cm-editor")).not.toBeNull();
+  });
+});
+
+describe("FileExplorerPanel — lazy tree (v3.11.2)", () => {
+  it("lists the root through listRepoDir and a folder only when it is opened", async () => {
+    mountPanel();
+    await settle();
+    expect(listRepoDir).toHaveBeenCalledWith(REPO, "", false);
+    const folder = [...container.querySelectorAll<HTMLElement>("[role=treeitem]")].find((r) => r.textContent?.includes("lib"))!;
+    folder.click();
+    await settle();
+    expect(listRepoDir).toHaveBeenCalledWith(REPO, "lib", false);
+    expect(container.textContent).toContain("c.ts");
   });
 });

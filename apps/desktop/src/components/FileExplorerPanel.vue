@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, toRef, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useFileExplorer, resolveFileExplorerShortcut, type FileTab } from "../composables/useFileExplorer";
-import { useRepoFileTree } from "../composables/useRepoFileTree";
+import { useLazyRepoTree, type TreeWatcher } from "../composables/useLazyRepoTree";
 import { useSettings } from "../composables/useSettings";
 import { useI18n } from "../composables/useI18n";
 import { useDraggableResizable } from "../composables/useDraggableResizable";
 import type { RepoFileEntry } from "../composables/useGitRepo";
-import { getGitBlame } from "../utils/backend";
+import { getGitBlame, listRepoDir } from "../utils/backend";
 import { buildBlameModel, type BlameGutterEntry } from "../composables/useBlameGutter";
 import { useCodeMirror } from "../composables/useCodeMirror";
 import { peekCodeMirror } from "../utils/codemirrorLibs";
@@ -15,6 +15,8 @@ import type { EditorState as EditorStateType, Extension } from "@codemirror/stat
 const props = defineProps<{
   repoPath: string;
   changedFiles: RepoFileEntry[];
+  /** v3.11.2 — live refresh; optional so existing mounts keep working. */
+  watcher?: TreeWatcher | null;
 }>();
 
 const emit = defineEmits<{
@@ -28,9 +30,17 @@ const explorer = useFileExplorer();
 
 const repoPathRef = toRef(props, "repoPath");
 const changedFilesRef = toRef(props, "changedFiles");
-const tree = useRepoFileTree(repoPathRef, changedFilesRef);
-
-watch(repoPathRef, () => tree.refresh(), { immediate: true });
+// Lazy, live tree (v3.11.2): replaces the one-shot 20,000-entry list_repo_tree
+// load. Its own storage prefix keeps the panel's expansion separate from the
+// Files view's.
+const tree = useLazyRepoTree({
+  repoPath: repoPathRef,
+  root: ref(""),
+  repoFiles: changedFilesRef,
+  listDir: (dir, includeIgnored) => listRepoDir(props.repoPath, dir, includeIgnored),
+  watcher: props.watcher ?? null,
+  storageKeyPrefix: "gitwand-explorer-tree:",
+});
 
 const tabs = computed(() => explorer.tabsFor(props.repoPath));
 const activeId = computed(() => explorer.activeTabId(props.repoPath));
@@ -443,9 +453,6 @@ function onKeyDown(e: KeyboardEvent) {
         </button>
       </div>
       <div class="fe__header-spacer" />
-      <button v-if="tree.truncated.value" class="fe__truncated" :title="t('files.truncatedTooltip')">
-        {{ t("files.truncatedBadge") }}
-      </button>
       <button
         class="fe__full"
         :title="fullscreen ? t('files.exitFullscreen') : t('files.fullscreen')"
@@ -474,13 +481,13 @@ function onKeyDown(e: KeyboardEvent) {
           :style="{ paddingLeft: `${row.depth * 14 + (row.kind === 'folder' ? 5 : 18)}px` }"
           role="treeitem"
           tabindex="0"
-          @click="row.kind === 'folder' ? tree.toggleFolder(row.path) : onFileClick(row.path)"
+          @click="row.kind === 'folder' ? tree.toggle(row.path) : row.kind === 'file' ? onFileClick(row.path) : row.kind === 'error' ? tree.retry(row.path) : undefined"
           @dblclick="row.kind === 'file' && onFileDblClick(row.path)"
         >
           <template v-if="row.kind === 'folder'">
             <svg
               class="tree-chevron"
-              :class="{ 'tree-chevron--collapsed': tree.isCollapsed(row.path) }"
+              :class="{ 'tree-chevron--collapsed': !row.expanded }"
               width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
             >
@@ -491,17 +498,20 @@ function onKeyDown(e: KeyboardEvent) {
               <path d="M3 5h6l2 2h10v12H3z" />
             </svg>
             <span class="file-name mono tree-folder-name">{{ row.name }}</span>
-            <span class="tree-folder-count">{{ row.count }}</span>
+            <span v-if="row.badge" class="tree-folder-count">{{ row.badge.changed }}</span>
           </template>
-          <template v-else>
+          <template v-else-if="row.kind === 'file'">
             <span
-              v-if="tree.statusByPath.value.get(row.path)"
+              v-if="row.status"
               class="file-status-dot"
-              :class="`file-status-dot--${tree.statusByPath.value.get(row.path)}`"
-              :title="tree.statusByPath.value.get(row.path)"
+              :class="`file-status-dot--${row.status.status}`"
+              :title="row.status.status"
             />
             <span class="file-name mono">{{ row.name }}</span>
           </template>
+          <span v-else-if="row.kind === 'loading'" class="file-name">{{ t('filesView.loading') }}</span>
+          <span v-else-if="row.kind === 'error'" class="file-name" :title="row.message">{{ t('filesView.loadError', row.message) }}</span>
+          <span v-else class="file-name">{{ t('filesView.truncated', '5,000') }}</span>
         </div>
       </div>
 

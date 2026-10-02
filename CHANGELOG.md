@@ -13,7 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Keyboard-first.** Arrow keys expand, collapse, descend and climb. Enter opens a file or toggles a folder, Home and End jump to the ends, typing a name jumps to it, and ⇧F10 opens the context menu. The tree is virtualized and exposes `role="tree"` with a single tab stop.
   - **Preview, not editor.** An unchanged file opens in a read-only code viewer. A changed one shows the inline diff, with a Working tree | Index switch when it is both staged and modified. A conflicted file offers "Open in merge editor", and a binary or larger-than-5 MB file shows a placeholder instead of being read. Open in editor and Reveal in Finder / Explorer hand the file to the system.
   - **Live, and scope-aware.** The tree refreshes from the Live Repo watcher and re-lists only the folders that changed. Right-click "Scope here" narrows the whole app to a folder, the tree re-roots on it, and if that folder is deleted, the view falls back to the whole repo with a notice. Expanded folders, the selection and "Show ignored" are remembered per repository.
-  - The existing Files panel (File Explorer, with tabs and editing) is unchanged.
+  - The existing Files panel keeps its tabs and editing (see Changed).
+
+### Changed
+- **The Files panel lists folders lazily and refreshes live.** The File Explorer panel used to load the whole repository once, capped at 20,000 entries, and never refreshed. It now uses the Files view's tree model: each folder is listed when it is opened, folders show a count of changes below them, and the Live Repo watcher keeps the tree current.
 
 ### Fixed
 - **The Linux AppImage would not start for a user other than the one who mounted it.** The Tauri bundler stored the launcher, `AppRun.wrapped`, as `0770` (tauri-apps/tauri#16155). A normal start never noticed, but `firejail --appimage`, which mounts the image as root, got `Permission denied`, and so did the AppImage catalog's test (AppImage/appimage.github.io#7392). `@tauri-apps/cli` is now on 2.12, which ships the launcher as `0755`, and the CI bundle build fails if any file in the AppImage is executable or readable by its owner only.

@@ -4586,6 +4586,7 @@ onUnmounted(() => {
           v-if="showFiles && repoFolderPath"
           :repo-path="repoFolderPath"
           :changed-files="repoFiles"
+          :watcher="repoWatcher"
           @close="showFiles = false"
           @request-close-tab="onRequestCloseFileTab"
         />
