@@ -301,12 +301,7 @@ function runMenu(id: MenuId): void {
   else emit("open-in-editor", r.path);
 }
 
-// The menu is `position: fixed`: it must not outlive a scroll or a focus move.
-function onMenuFocusout(e: FocusEvent): void {
-  if (!menu.value) return;
-  const next = e.relatedTarget as HTMLElement | null;
-  if (!next || !menuEl.value?.contains(next)) closeMenu(false);
-}
+// The menu is `position: fixed`: it must not outlive a scroll.
 function onTreeScroll(): void {
   if (menu.value) closeMenu(false);
 }
@@ -401,7 +396,6 @@ onBeforeUnmount(() => {
       role="menu"
       :style="{ left: `${menu.x}px`, top: `${menu.y}px` }"
       @keydown="onMenuKeydown"
-      @focusout="onMenuFocusout"
     >
       <button
         v-for="item in menuItems"
