@@ -186,6 +186,77 @@ describe("FileTreePane — context menu", () => {
   });
 });
 
+describe("FileTreePane — context menu lifecycle", () => {
+  async function openOnFolder() {
+    const events = await mount();
+    items()[0]!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 5)); // let the outside-click listener register
+    expect(document.querySelector("[role=menu]")).not.toBeNull();
+    return events;
+  }
+  const menuOpen = () => document.querySelector("[role=menu]") !== null;
+  const closed = async () => {
+    await nextTick();
+    return !menuOpen();
+  };
+
+  it("closes on Escape", async () => {
+    await openOnFolder();
+    document.querySelector("[role=menuitem]")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(await closed()).toBe(true);
+  });
+
+  it("closes on an outside pointerdown", async () => {
+    await openOnFolder();
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(await closed()).toBe(true);
+  });
+
+  it("closes on Tab and gives the keyboard back to the tree", async () => {
+    await openOnFolder();
+    document.querySelector("[role=menuitem]")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    expect(await closed()).toBe(true);
+    key("ArrowDown");
+    expect(tree().getAttribute("aria-activedescendant")).not.toBeNull();
+  });
+
+  it("closes when focus leaves the menu", async () => {
+    await openOnFolder();
+    document.querySelector("[role=menu]")!.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: document.body }));
+    expect(await closed()).toBe(true);
+  });
+
+  it("closes when the tree scrolls", async () => {
+    await openOnFolder();
+    tree().dispatchEvent(new Event("scroll"));
+    expect(await closed()).toBe(true);
+  });
+
+  it("leaves no pointerdown listener on window when unmounted right after opening", async () => {
+    const added: unknown[] = [];
+    const removed: unknown[] = [];
+    const add = vi.spyOn(window, "addEventListener").mockImplementation(((t: string, l: unknown) => {
+      if (t === "pointerdown") added.push(l);
+    }) as typeof window.addEventListener);
+    const rem = vi.spyOn(window, "removeEventListener").mockImplementation(((t: string, l: unknown) => {
+      if (t === "pointerdown") removed.push(l);
+    }) as typeof window.removeEventListener);
+    try {
+      await mount({ selectedPath: "src/a.ts" });
+      key("F10", { shiftKey: true });
+      await nextTick();
+      app!.unmount();
+      app = null;
+      await new Promise((r) => setTimeout(r, 5));
+      expect(added.filter((l) => !removed.includes(l))).toEqual([]);
+    } finally {
+      add.mockRestore();
+      rem.mockRestore();
+    }
+  });
+});
+
 describe("FileTreePane — Show ignored", () => {
   it("emits the new value", async () => {
     const events = await mount();

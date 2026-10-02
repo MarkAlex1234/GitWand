@@ -238,7 +238,11 @@ async function openMenu(index: number, x: number, y: number): Promise<void> {
     el.querySelector<HTMLElement>("[role=menuitem]")?.focus();
   }
   // After this event cycle, or the opening right-click closes it at once.
-  setTimeout(() => window.addEventListener("pointerdown", onOutside, true), 0);
+  clearOutsideTimer();
+  outsideTimer = setTimeout(() => {
+    outsideTimer = null;
+    if (menu.value) window.addEventListener("pointerdown", onOutside, true);
+  }, 0);
 }
 
 function onRowContextMenu(e: MouseEvent, i: number): void {
@@ -251,7 +255,14 @@ async function openMenuForIndex(i: number): Promise<void> {
   await openMenu(i, (rect?.left ?? 0) + 24, rect?.bottom ?? 0);
 }
 
+let outsideTimer: ReturnType<typeof setTimeout> | null = null;
+function clearOutsideTimer(): void {
+  if (outsideTimer !== null) clearTimeout(outsideTimer);
+  outsideTimer = null;
+}
+
 function closeMenu(refocus = true): void {
+  clearOutsideTimer();
   menu.value = null;
   window.removeEventListener("pointerdown", onOutside, true);
   if (refocus) scrollEl.value?.focus();
@@ -264,7 +275,10 @@ function onOutside(e: PointerEvent): void {
 function onMenuKeydown(e: KeyboardEvent): void {
   const buttons = [...(menuEl.value?.querySelectorAll<HTMLElement>("[role=menuitem]") ?? [])];
   const i = buttons.indexOf(document.activeElement as HTMLElement);
-  if (e.key === "Escape") {
+  if (e.key === "Tab") {
+    e.preventDefault();
+    closeMenu();
+  } else if (e.key === "Escape") {
     e.preventDefault();
     e.stopPropagation();
     closeMenu();
@@ -287,7 +301,20 @@ function runMenu(id: MenuId): void {
   else emit("open-in-editor", r.path);
 }
 
-onBeforeUnmount(() => window.removeEventListener("pointerdown", onOutside, true));
+// The menu is `position: fixed`: it must not outlive a scroll or a focus move.
+function onMenuFocusout(e: FocusEvent): void {
+  if (!menu.value) return;
+  const next = e.relatedTarget as HTMLElement | null;
+  if (!next || !menuEl.value?.contains(next)) closeMenu(false);
+}
+function onTreeScroll(): void {
+  if (menu.value) closeMenu(false);
+}
+
+onBeforeUnmount(() => {
+  clearOutsideTimer();
+  window.removeEventListener("pointerdown", onOutside, true);
+});
 </script>
 
 <template>
@@ -311,6 +338,8 @@ onBeforeUnmount(() => window.removeEventListener("pointerdown", onOutside, true)
       :aria-label="t('filesView.treeLabel', label)"
       :aria-activedescendant="activeId"
       @keydown="onKeydown"
+      @scroll="onTreeScroll"
+      @wheel.passive="onTreeScroll"
     >
       <div class="ftp__sizer" :style="{ height: `${totalSize}px` }">
         <div
@@ -372,6 +401,7 @@ onBeforeUnmount(() => window.removeEventListener("pointerdown", onOutside, true)
       role="menu"
       :style="{ left: `${menu.x}px`, top: `${menu.y}px` }"
       @keydown="onMenuKeydown"
+      @focusout="onMenuFocusout"
     >
       <button
         v-for="item in menuItems"
