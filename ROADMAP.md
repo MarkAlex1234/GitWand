@@ -29,6 +29,8 @@ diff-only and the wrong substrate, so this is a new surface rather than a
 reskin. It lands right-click "Scope here" on real ground, and gives macOS users
 a Finder-like mode to counter RelaGit and Strand's more rigid UIs.
 
+Delivered in the File Explorer panel rather than as a separate view (decision of 2026-10-02, spec addendum `2026-10-02-finder-converge-on-explorer-design.md`): one file browser, which can also edit.
+
 ---
 
 ### v3.12.0 — Stacked Branches (native)
@@ -118,7 +120,7 @@ _Synthesis: none of the three addresses structured conflict-resolution AI (Stran
 
 ### Later (unscheduled)
 
-- **Re-list loaded folders without the watcher** (follow-up to v3.11.2) — the Browse tree and the File Explorer panel re-list a loaded folder only on a watcher event. With Live Repo off, or with the watcher unhealthy (network mounts, for instance), new and deleted files never appear in a folder already loaded, while the folder badges, fed by status polling, do change, so the tree and its badges disagree. Add a Refresh action, or re-list the loaded folders whenever the `repoFiles` path set changes and the watcher is not healthy.
+- **Re-list loaded folders without the watcher** (follow-up to v3.11.2) — the File Explorer panel re-lists a loaded folder only on a watcher event. With Live Repo off, or with the watcher unhealthy (network mounts, for instance), new and deleted files never appear in a folder already loaded, while the folder badges, fed by status polling, do change, so the tree and its badges disagree. Add a Refresh action, or re-list the loaded folders whenever the `repoFiles` path set changes and the watcher is not healthy.
 - **Snapshot rebase/cherry-pick state** — v3.8 restores `MERGE_HEAD` but not `.git/rebase-merge/` or `.git/sequencer/`, so restoring a snapshot taken mid-rebase or mid-cherry-pick brings the files and index stages back without the in-progress sequence. Restoring those is a directory copy rather than a plumbing call, which is why it was left out of the first pass. Revisit if users report rewinding mid-rebase.
 - **Snapshot cost on very large working trees** — each snapshot runs `git add -A` into a scratch index, which is O(worktree) on a cold cache. Fine on normal repos, unmeasured on a 100k-file monorepo. Benchmark alongside the v3.10 FS-watcher work, where the same walk gains a second consumer.
 - **Snapshot refs are visible to a bare `git log --all`** — GitWand excludes them from every traversal it runs, but any ref under `refs/` is by definition part of `--all`, so a user typing it in a terminal sees snapshot commits, exactly as they see `refs/stash`. Nothing to fix short of abandoning refs entirely (which would let `gc` eat the snapshots); documented here so it is a known property rather than a surprise.
@@ -147,9 +149,9 @@ _Synthesis: none of the three addresses structured conflict-resolution AI (Stran
 - **Rename-aware history** — `blame -M -C` / `log --follow` for the v3.11.1 history context.
 - **Dedicated `git_conflict_history` Rust command** — one IPC round-trip and a real process timeout, if the `gitExec` round-trips of v3.11.1 prove slow.
 - **Honor `.gitwandrc` `llmFallback.model` / `maxTokens` on the desktop** — ignored today in favour of the app's AI settings.
-- **Files view follow-ups** (out of scope for v3.11.2, spec §10). The view is deliberately read-only. Not done: editing in the view, stage/unstage from the view, file operations (rename, delete, create), and tree-wide name search beyond type-ahead over the visible rows. Each needs its own design: editing would have to coexist with the File Explorer panel's tabs, and search with a 5,000-per-folder listing cap.
-- **Keyboard navigation in the File Explorer panel's tree.** Its rows have `tabindex` but no key handling. The Files view's `fileTreeKeymap` could be reused.
-- **Live Repo watcher blind spot on ignored folders.** The watcher drops events under `node_modules`, `target`, `dist`, `.venv` and `__pycache__`, so an ignored folder expanded with "Show ignored" in the Files view does not refresh live. Collapsing and re-expanding it re-lists it.
+- **File Explorer follow-ups** (out of scope for v3.11.2, spec §10 and its 2026-10-02 addendum). Not done: stage/unstage from the panel, file operations (rename, delete, create), and tree-wide name search beyond type-ahead over the visible rows. Each needs its own design, and search would have to work with a 5,000-per-folder listing cap.
+- **Refresh a clean File Explorer tab on an external change.** A tab's buffer is read when the tab opens. Since v3.11.2 a clean tab re-reads the disk when it leaves its Diff side, but a tab that stays on File does not see an edit made outside GitWand until it is reopened. The watcher already reports the path, so a clean tab could reload in place, and a dirty one could offer to.
+- **Live Repo watcher blind spot on ignored folders.** The watcher drops events under `node_modules`, `target`, `dist`, `.venv` and `__pycache__`, so an ignored folder expanded with "Show ignored" in the File Explorer does not refresh live. Collapsing and re-expanding it re-lists it.
 
 ---
 
