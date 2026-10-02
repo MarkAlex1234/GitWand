@@ -70,3 +70,30 @@ describe("listRepoDir", () => {
     await expect(listRepoDir("/repo", "gone", false)).rejects.toThrow("Directory not found: gone");
   });
 });
+
+describe("revealInFileManager", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    devFetch.mockReset();
+    tauriInvoke.mockReset();
+    tauri = false;
+  });
+
+  it("invokes reveal_in_file_manager under Tauri", async () => {
+    tauri = true;
+    tauriInvoke.mockResolvedValue(undefined);
+    const { revealInFileManager } = await import("../backend");
+    await revealInFileManager("/repo", "src/a.ts");
+    expect(tauriInvoke).toHaveBeenCalledWith("reveal_in_file_manager", { cwd: "/repo", path: "src/a.ts" });
+  });
+
+  it("POSTs to the dev-server and surfaces its refusal", async () => {
+    devFetch.mockResolvedValue(errRes(400, { error: "Path not found: x" }));
+    const { revealInFileManager } = await import("../backend");
+    await expect(revealInFileManager("/repo", "x")).rejects.toThrow("Path not found: x");
+    expect(devFetch).toHaveBeenCalledWith(
+      "http://localhost:3001/api/reveal-in-file-manager",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ cwd: "/repo", path: "x" }) }),
+    );
+  });
+});

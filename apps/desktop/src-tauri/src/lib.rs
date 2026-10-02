@@ -775,6 +775,7 @@ pub fn run() {
             commands::ops::git_stash_pop,
             commands::ops::open_in_editor,
             commands::ops::open_url,
+            commands::ops::reveal_in_file_manager,
             commands::ops::set_git_config,
             commands::ops::read_gitwandrc,
             commands::read::preview_merge,

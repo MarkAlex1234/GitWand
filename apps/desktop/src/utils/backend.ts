@@ -1555,6 +1555,27 @@ export async function openInEditor(cwd: string, path: string, editor: string = "
 }
 
 /**
+ * Show a working-tree path in the OS file manager (Files view, v3.11.2):
+ * selected in Finder / Explorer, its folder opened on Linux. Throws with the
+ * backend's message when the path is missing or outside the repo.
+ */
+export async function revealInFileManager(cwd: string, path: string): Promise<void> {
+  if (isTauri()) {
+    await tauriInvoke("reveal_in_file_manager", { cwd, path });
+    return;
+  }
+  const res = await devFetch(`${DEV_SERVER}/api/reveal-in-file-manager`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd, path }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `reveal_in_file_manager failed: ${res.status}`);
+  }
+}
+
+/**
  * Configure the git binary path used by all Rust git commands.
  * Pass an empty string to reset to the system default ("git").
  */

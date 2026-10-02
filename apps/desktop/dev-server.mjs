@@ -2157,6 +2157,23 @@ async function handleRequest(req, res) {
       }
     }
 
+    // POST /api/reveal-in-file-manager  { cwd, path }
+    //
+    // Stands in for the Tauri `reveal_in_file_manager` (v3.11.2), which opens
+    // the OS file manager: only the packaged app on the user's desktop session
+    // can do that. The route validates the path exactly as the Rust command
+    // does (safe_repo_path, then existence), so a bad path fails the same way
+    // under `pnpm dev:web`, and then it only logs.
+    if (url.pathname === "/api/reveal-in-file-manager" && req.method === "POST") {
+      const { cwd, path } = await readBody(req);
+      let full;
+      try { full = safeRepoPath(cwd, path); }
+      catch (e) { return jsonResponse(req, res, { error: e.message }, 400); }
+      if (!existsSync(full)) return jsonResponse(req, res, { error: `Path not found: ${path}` }, 400);
+      console.info(`[dev] revealInFileManager: ${full}`);
+      return jsonResponse(req, res, { ok: true });
+    }
+
     // GET /api/list-dir?path=/some/dir  — list directories for folder picker
     if (url.pathname === "/api/list-dir" && req.method === "GET") {
       const dirPath = resolve(url.searchParams.get("path") || homedir());

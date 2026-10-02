@@ -4738,6 +4738,79 @@ pub(crate) async fn open_in_editor(
     Ok(())
 }
 
+// ─── Reveal in the OS file manager (Files view, v3.11.2) ─────
+
+/// What `reveal_in_file_manager` opens, after `safe_repo_path`: a path that
+/// exists inside the repo. A symlink leading out of the repo canonicalizes
+/// outside it and is refused like any other escape.
+fn reveal_target(cwd: &str, path: &str) -> Result<std::path::PathBuf, String> {
+    let full = safe_repo_path(cwd, path)?;
+    if !full.exists() {
+        return Err(format!("Path not found: {}", path));
+    }
+    Ok(full)
+}
+
+/// Show a working-tree path in the OS file manager. macOS and Windows select
+/// the item; Linux has no portable "select", so it opens the parent folder
+/// through the same opener chain as `open_url` (AppImage-safe env, exit
+/// status checked).
+#[tauri::command]
+pub(crate) async fn reveal_in_file_manager(cwd: String, path: String) -> Result<(), String> {
+    let target = reveal_target(&cwd, &path)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        hidden_cmd("open")
+            .arg("-R")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("Failed to reveal {}: {}", path, e))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // `canonicalize` yields a verbatim `\\?\C:\…` path, which Explorer
+        // does not understand.
+        let raw = target.to_string_lossy().to_string();
+        let plain = if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{}", rest)
+        } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            raw
+        };
+        // Explorer parses its own command line: `/select,` must be followed by
+        // the quoted path inside the same argument, which `arg()` would wrap
+        // in quotes as a whole. A Windows path cannot contain `"`.
+        hidden_cmd("explorer")
+            .raw_arg(format!("/select,\"{}\"", plain))
+            .spawn()
+            .map_err(|e| format!("Failed to reveal {}: {}", path, e))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let dir = target.parent().unwrap_or(&target).to_path_buf();
+        let openers: [(&str, &[&str]); 3] =
+            [("xdg-open", &[]), ("gio", &["open"]), ("kde-open5", &[])];
+        let mut errors: Vec<String> = Vec::new();
+        for (bin, prefix) in openers {
+            let mut cmd = hidden_cmd(bin);
+            cmd.args(prefix).arg(&dir);
+            sanitize_appimage_search_paths(&mut cmd);
+            match try_open_linux(cmd, bin) {
+                Ok(()) => return Ok(()),
+                Err(e) => errors.push(e),
+            }
+        }
+        Err(format!("Failed to reveal {}: {}", path, errors.join("; ")))
+    }
+}
+
 // ─── Transparent command log ──────────────────────────────────
 
 #[tauri::command]
@@ -6003,5 +6076,61 @@ mod operation_action_tests {
         assert!(operation_action_args("merge", "quit").is_err());
         // An argument that would be read as an option must never reach git.
         assert!(operation_action_args("--upload-pack=evil", "abort").is_err());
+    }
+}
+
+#[cfg(test)]
+mod reveal_tests {
+    use super::reveal_target;
+
+    fn temp_repo(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gitwand-reveal-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src").join("a.rs"), "").unwrap();
+        dir
+    }
+
+    #[test]
+    fn reveal_target_resolves_an_existing_path_inside_the_repo() {
+        let repo = temp_repo("ok");
+        let cwd = repo.to_string_lossy().to_string();
+        let target = reveal_target(&cwd, "src/a.rs").unwrap();
+        assert!(target.ends_with("src/a.rs"));
+        assert!(target.is_absolute());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn reveal_target_refuses_paths_outside_the_repo() {
+        let repo = temp_repo("escape");
+        let cwd = repo.to_string_lossy().to_string();
+        let err = reveal_target(&cwd, "../").unwrap_err();
+        assert!(err.contains("path escapes cwd"), "{err}");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(std::env::temp_dir(), repo.join("link-out")).unwrap();
+            let err = reveal_target(&cwd, "link-out").unwrap_err();
+            assert!(err.contains("path escapes cwd"), "{err}");
+        }
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn reveal_target_reports_a_missing_path() {
+        let repo = temp_repo("missing");
+        let cwd = repo.to_string_lossy().to_string();
+        assert_eq!(
+            reveal_target(&cwd, "src/gone.rs").unwrap_err(),
+            "Path not found: src/gone.rs"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }
