@@ -2,7 +2,7 @@
  * useTreeScopeRoot — the File Explorer panel's tree root under the workspace
  * scope (v3.11.2).
  *
- * Lifted from the Browse view (FilesView.vue, removed in the same release).
+ * Lifted from the Browse view, removed in the same release.
  * With a scope active the tree is rooted at the scope folder. A root that
  * fails to list is either gone or merely unreadable: only a folder that no
  * longer exists clears the scope (spec §8), and an unreadable one keeps it,

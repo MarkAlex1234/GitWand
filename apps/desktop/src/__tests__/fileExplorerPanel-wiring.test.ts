@@ -37,4 +37,14 @@ describe("App.vue — File Explorer panel wiring", () => {
       /function hideFilesOnHandoff\(\): void \{\n\s*if \(showFiles\.value && settings\.value\.filesHideOnNav\) showFiles\.value = false;/,
     );
   });
+
+  it("is reachable from the command palette and the View menu, through the dock's own toggle", () => {
+    // Browse's entries are gone; the panel's only other way in was the dock tile.
+    expect(appVue).toMatch(/@toggle-files="toggleFiles\(\)"/);
+    expect(appVue).toMatch(/\{ id: "toggle-file-explorer", label: t\("header\.paletteToggleFileExplorer"\) \}/);
+    expect(appVue).toMatch(/case "toggle-file-explorer": toggleFiles\(\); break;/);
+    expect(appVue).toMatch(/toggleFileExplorer: \(\) => toggleFiles\(\)/);
+    const menu = readFileSync(resolve(__dirname, "../composables/useAppMenu.ts"), "utf-8");
+    expect(menu).toMatch(/text: t\("menu\.toggleFileExplorer"\),\n\s*enabled: hasRepo,\n\s*action: \(\) => actions\.toggleFileExplorer\(\)/);
+  });
 });

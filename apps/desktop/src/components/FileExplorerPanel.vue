@@ -55,7 +55,6 @@ const tree = useLazyRepoTree({
   listDir: (dir, includeIgnored) => listRepoDir(props.repoPath, dir, includeIgnored),
   watcher: props.watcher ?? null,
   onRootError: () => void scope.onRootError(),
-  storageKeyPrefix: "gitwand-explorer-tree:",
 });
 const repoName = computed(() => props.repoPath.split(/[\\/]/).filter(Boolean).pop() ?? props.repoPath);
 

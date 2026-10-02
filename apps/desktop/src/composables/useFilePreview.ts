@@ -1,10 +1,10 @@
 /**
- * useFilePreview — what the Files view's preview pane shows (v3.11.2).
+ * useFilePreview — what a File Explorer tab's Diff side shows (v3.11.2).
  *
  * `planPreview` is the spec §7 table as a pure function: a selection and a
  * Working tree | Index side in, a plan out. `useFilePreview` runs the plan
  * through injected loaders and guards against the race that matters while
- * arrowing through the tree: every load carries a request id, and a response
+ * switching tabs or sides: every load carries a request id, and a response
  * for an earlier selection is dropped. It reloads through the watcher when the
  * previewed file changes on disk, stale-while-revalidate: a reload of what is
  * already shown keeps it on screen until the new response lands, so a save in

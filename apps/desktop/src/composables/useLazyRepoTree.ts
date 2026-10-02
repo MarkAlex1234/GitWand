@@ -1,5 +1,5 @@
 /**
- * useLazyRepoTree — the working-tree model behind the Files view (v3.11.2).
+ * useLazyRepoTree — the working-tree model behind the File Explorer panel (v3.11.2).
  *
  * One directory is listed at a time, through an injected `listDir`, the first
  * time it is expanded; the root (the whole repo, or the active scope) is
@@ -24,7 +24,7 @@ import type { RepoChangeEvent, RepoDirEntry, RepoDirListing } from "../utils/bac
 /** Per-directory cap of both backends (MAX_REPO_DIR_ENTRIES in files.rs and dev-server.mjs). */
 export const DIR_ENTRY_CAP = 5000;
 export const WATCH_DEBOUNCE_MS = 300;
-export const FILES_VIEW_STORAGE_PREFIX = "gitwand-files-view:";
+export const EXPLORER_TREE_STORAGE_PREFIX = "gitwand-explorer-tree:";
 
 export type ListDirFn = (dir: string, includeIgnored: boolean) => Promise<RepoDirListing>;
 
@@ -90,7 +90,7 @@ export interface UseLazyRepoTreeOptions {
   /** The root itself failed to list: the caller decides whether the scope is gone. */
   onRootError?: (message: string) => void;
   debounceMs?: number;
-  /** Defaults to `FILES_VIEW_STORAGE_PREFIX`; `null` turns persistence off. */
+  /** Defaults to `EXPLORER_TREE_STORAGE_PREFIX`; `null` turns persistence off. */
   storageKeyPrefix?: string | null;
 }
 
@@ -217,7 +217,7 @@ function buildDeletedIndex(
 
 export function useLazyRepoTree(opts: UseLazyRepoTreeOptions) {
   const debounceMs = opts.debounceMs ?? WATCH_DEBOUNCE_MS;
-  const prefix = opts.storageKeyPrefix === undefined ? FILES_VIEW_STORAGE_PREFIX : opts.storageKeyPrefix;
+  const prefix = opts.storageKeyPrefix === undefined ? EXPLORER_TREE_STORAGE_PREFIX : opts.storageKeyPrefix;
 
   const cache = new Map<string, DirState>();
   const version = ref(0);

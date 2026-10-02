@@ -9,7 +9,7 @@ import {
   useLazyRepoTree,
   buildStatusMap,
   WATCH_DEBOUNCE_MS,
-  FILES_VIEW_STORAGE_PREFIX,
+  EXPLORER_TREE_STORAGE_PREFIX,
   type LazyTreeRow,
   type ListDirFn,
   type TreeWatcher,
@@ -360,7 +360,7 @@ describe("useLazyRepoTree — Show ignored and persistence", () => {
     first.tree.selected.value = "src/lib/util.ts";
     first.tree.showIgnored.value = true;
     await flush();
-    expect(JSON.parse(localStorage.getItem(`${FILES_VIEW_STORAGE_PREFIX}/repo`)!)).toEqual({
+    expect(JSON.parse(localStorage.getItem(`${EXPLORER_TREE_STORAGE_PREFIX}/repo`)!)).toEqual({
       expanded: ["src", "src/lib"], selected: "src/lib/util.ts", showIgnored: true,
     });
     first.scope.stop();

@@ -68,8 +68,7 @@ export type ViewMode =
   | "graph"
   | "prs"
   | "launchpad"
-  | "issue"
-  | "files";
+  | "issue";
 
 /** Modal-based confirmation (App.vue's `askConfirm`), injected to avoid native `confirm()`. */
 export type ConfirmFn = (opts: {

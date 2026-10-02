@@ -418,13 +418,12 @@ describe("FileExplorerPanel — tree (v3.11.2)", () => {
     expect(row("b.ts").getAttribute("aria-selected")).toBe("false");
   });
 
-  it("persists the expansion under the panel's own key, not the Files view's", async () => {
+  it("persists the expansion under the panel's own key", async () => {
     mountPanel();
     await settle();
     row("lib").click();
     await settle();
     expect(localStorage.getItem(`gitwand-explorer-tree:${REPO}`)).not.toBeNull();
-    expect(localStorage.getItem(`gitwand-files-view:${REPO}`)).toBeNull();
   });
 
   it("Show ignored re-lists the tree with ignored entries", async () => {
