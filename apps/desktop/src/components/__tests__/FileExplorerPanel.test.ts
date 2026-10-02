@@ -657,6 +657,20 @@ describe("FileExplorerPanel — Diff | File (v3.11.2)", () => {
     expect(getGitDiff).not.toHaveBeenCalled();
   });
 
+  it("an untracked file over 5 MB shows the too-large placeholder without diffing it", async () => {
+    FS[""].push({ name: "big.log", path: "big.log", kind: "file", ignored: false, size: 6 * 1024 * 1024 });
+    try {
+      mountPanel([{ path: "big.log", status: "added", section: "untracked" }]);
+      await settle();
+      row("big.log").click();
+      await settle();
+      expect(getGitDiff).not.toHaveBeenCalled();
+      expect(container.textContent).toContain(en.filesView.preview.tooLarge.replace("{0}", "6.0 MB"));
+    } finally {
+      FS[""].pop();
+    }
+  });
+
   it("a diff that resolves after switching to File is dropped", async () => {
     const late = deferred<unknown>();
     vi.mocked(getGitDiff).mockImplementationOnce(() => late.promise as never);

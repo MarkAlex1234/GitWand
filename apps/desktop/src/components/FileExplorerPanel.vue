@@ -427,9 +427,12 @@ const previewTarget = computed<PreviewTarget | null>(() => {
   const tab = activeTab.value;
   const status = activeStatus.value;
   if (!tab || !status || !showDiff.value) return null;
-  // `size` only lets planPreview refuse a huge untracked file before diffing
-  // it. A tab does not know its size, and the Rust diff truncates at 5 MB.
-  return { kind: "file", path: tab.path, size: 0, symlink: false, status };
+  // `size` lets planPreview refuse a huge untracked file before diffing it
+  // (the Rust diff only truncates at 5 MB). The tree row carries it; a file
+  // whose folder is not loaded has no row, and keeps 0.
+  const row = tree.rows.value.find((r) => r.kind === "file" && r.path === tab.path);
+  const size = row?.kind === "file" ? row.size : 0;
+  return { kind: "file", path: tab.path, size, symlink: false, status };
 });
 // Request-id race guard and stale-while-revalidate watcher reload come with
 // useFilePreview: a response for an earlier tab, side or repo is dropped.
