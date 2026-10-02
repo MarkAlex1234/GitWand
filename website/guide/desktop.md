@@ -96,7 +96,7 @@ The backing `folder_diff` backend command (Rust/Tauri + Node dev-server + TypeSc
 
 ## File Explorer (v3.11.2)
 
-The **Files** tile in the dock opens the File Explorer, with the working tree on the left and your open files on the right. You can also open it from the command palette (**Toggle File Explorer**) or the **View** menu. It can float, dock at the bottom or go full-screen.
+The **Files** tile in the dock opens the File Explorer, with the working tree on the left and your open files on the right. You can also open it from the command palette (**Toggle File Explorer**) and, on macOS, the **View** menu. It can float, dock at the bottom or go full-screen.
 
 - **Status at a glance.** Changed files carry a letter (M, A, D, R, U, C), and every folder above a change carries a count, even a folder you have not opened. Deleted files stay in place, struck through.
 - **Ignored files on demand.** They are hidden by default. **Show ignored** shows them greyed out, and they are still loaded one folder at a time. A folder lists its first 5,000 entries.
