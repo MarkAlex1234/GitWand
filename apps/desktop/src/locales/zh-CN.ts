@@ -124,6 +124,7 @@ const zhCN: Locale = {
     paletteViewChanges: "\u89c6\u56fe\uff1a\u66f4\u6539",
     paletteViewLog: "\u89c6\u56fe\uff1a\u5386\u53f2",
     paletteViewGraph: "\u89c6\u56fe\uff1aGit \u6811\u56fe",
+    paletteViewFiles: "视图：浏览文件",
     // 标签页 + 下拉菜单 (v2.0)
     tabStripAddTitle: "添加标签页",
     tabStripOpenFolder: "打开文件夹",
@@ -1148,6 +1149,8 @@ const zhCN: Locale = {
       showPrs: "显示 PRs",
       showTerminal: "显示终端",
       showFiles: "显示文件",
+      itemFilesView: "浏览",
+      showFilesView: "显示浏览",
       gitTreeLocked: "Git 树和更改",
       lockedHint: "始终显示 — 无法移除。",
       hideChangesWhenEmpty: {
@@ -2406,6 +2409,7 @@ const zhCN: Locale = {
     toggleSidebar: "显示 / 隐藏侧边栏",
     toggleTheme: "切换浅色 / 深色模式",
     openLaunchpad: "打开 Today",
+    openFilesView: "浏览文件",
     documentation: "GitWand 文档",
     whatsNew: "新功能",
     reportIssue: "报告问题…",
@@ -2664,6 +2668,10 @@ const zhCN: Locale = {
       folderClean: "此文件夹下没有更改",
       folderMore: "以及另外 {0} 个",
     },
+    dockLabel: "浏览",
+    breadcrumbLabel: "位置",
+    scopeGone: "“{0}”不再存在 — 正在显示整个仓库。",
+    revealFailed: "无法显示 {0}：{1}",
   },
   secrets: {
     badgeTooltip: "在暂存的更改中发现 {0} 个潜在密钥",

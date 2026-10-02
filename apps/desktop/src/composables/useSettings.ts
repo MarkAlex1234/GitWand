@@ -15,6 +15,7 @@ import type { BlameAlgorithm } from "../utils/backend";
 import type { AIProvider } from "./useAIProvider";
 import type { SwitchBehavior } from "../utils/branchSwitchDecision";
 import type { PullDirtyBehavior } from "../utils/pullDirtyDecision";
+import type { ViewMode } from "./useGitRepo";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -27,13 +28,22 @@ export type { PullDirtyBehavior };
 export type LaunchpadTab = "inbox" | "wip" | "prs" | "issues" | "team";
 /** Granularity of PR-activity OS notifications (v2.16). */
 export type NotificationLevel = "all" | "reviews" | "ci" | "none";
-/** Dock entry ids (subset of ViewMode) — used for dock ordering (v3). */
-export type DockEntryId = "launchpad" | "dashboard" | "prs" | "graph" | "changes";
+/** Dock entry ids — used for dock ordering (v3). All but "files-view" are view modes too. */
+export type DockEntryId = "launchpad" | "dashboard" | "prs" | "graph" | "changes" | "files-view";
 /** Canonical default dock order, left → right. */
-export const DEFAULT_DOCK_ORDER: DockEntryId[] = ["launchpad", "dashboard", "prs", "graph", "changes"];
+export const DEFAULT_DOCK_ORDER: DockEntryId[] = ["launchpad", "dashboard", "prs", "graph", "changes", "files-view"];
 
 /**
- * Normalise a stored dock order so all five entries are present exactly once:
+ * The view a dock entry opens. Every entry is its own view mode except the
+ * v3.11.2 Files view: its dock id cannot be "files", which AppDock's menu
+ * already uses for the File Explorer tile.
+ */
+export function dockEntryViewMode(id: DockEntryId): ViewMode {
+  return id === "files-view" ? "files" : id;
+}
+
+/**
+ * Normalise a stored dock order so every entry is present exactly once:
  * keep the known/persisted order, then append any missing entries in default
  * order. Shared by AppDock (render order) and SettingsPanel (reorder list).
  */
@@ -47,11 +57,12 @@ export function normalizeDockOrder(stored: DockEntryId[] | undefined): DockEntry
 /** Per-entry "hidden from dock" flag. Git Tree & Changes are never hideable. */
 export function isDockEntryHidden(
   id: DockEntryId,
-  flags: Pick<AppSettings, "dockHideLaunchpad" | "dockHideDashboard" | "dockHidePrs">,
+  flags: Pick<AppSettings, "dockHideLaunchpad" | "dockHideDashboard" | "dockHidePrs" | "dockHideFilesView">,
 ): boolean {
   if (id === "launchpad") return flags.dockHideLaunchpad;
   if (id === "dashboard") return flags.dockHideDashboard;
   if (id === "prs") return flags.dockHidePrs;
+  if (id === "files-view") return flags.dockHideFilesView;
   return false;
 }
 
@@ -233,6 +244,8 @@ export interface AppSettings {
   dockHideTerminal: boolean;
   /** Hide the Files (File Explorer) tile from the bottom dock. */
   dockHideFiles: boolean;
+  /** v3.11.2 — hide the Files view ("Browse") entry from the dock. */
+  dockHideFilesView: boolean;
   /** Hide the Changes entry from the dock while the working tree is clean. */
   dockHideChangesWhenEmpty: boolean;
   /** Show only icons in the bottom dock (hide text labels). */
@@ -497,6 +510,7 @@ export const defaultAppSettings: AppSettings = {
   dockHidePrs: false,
   dockHideTerminal: false,
   dockHideFiles: false,
+  dockHideFilesView: false,
   dockHideChangesWhenEmpty: true,
   dockIconsOnly: false,
   dockVertical: false,

@@ -56,6 +56,7 @@ export interface AppMenuActions {
   toggleSidebar: () => void;
   toggleTheme: () => void;
   openLaunchpad: () => void;
+  openFilesView: () => void;
   // Help
   checkForUpdates: () => void;
   openHelp: () => void;
@@ -309,6 +310,12 @@ export function useAppMenu(actions: AppMenuActions, state: AppMenuState) {
           text: t("menu.openLaunchpad"),
           accelerator: "CmdOrCtrl+L",
           action: () => actions.openLaunchpad(),
+        }),
+        await MenuItem.new({
+          id: "view-open-files",
+          text: t("menu.openFilesView"),
+          enabled: hasRepo,
+          action: () => actions.openFilesView(),
         }),
         await PredefinedMenuItem.new({ item: "Separator" }),
         await PredefinedMenuItem.new({ item: "Fullscreen" }),

@@ -113,6 +113,7 @@ const fr: Locale = {
     paletteViewChanges: "Vue\u00a0: Modifications",
     paletteViewLog: "Vue\u00a0: Historique",
     paletteViewGraph: "Vue\u00a0: Arbre Git",
+    paletteViewFiles: "Vue\u00a0: Parcourir les fichiers",
     // Tab strip + dropdown (v2.0)
     tabStripAddTitle: "Ajouter un onglet",
     tabStripOpenFolder: "Ouvrir un dossier",
@@ -1452,6 +1453,8 @@ const fr: Locale = {
       showPrs: "Afficher les PRs",
       showTerminal: "Afficher le terminal",
       showFiles: "Afficher les fichiers",
+      itemFilesView: "Parcourir",
+      showFilesView: "Afficher Parcourir",
       gitTreeLocked: "Arbre Git & Modifications",
       lockedHint: "Toujours affichés — non supprimables.",
       hideChangesWhenEmpty: {
@@ -2406,6 +2409,7 @@ const fr: Locale = {
     toggleSidebar: "Afficher / masquer la sidebar",
     toggleTheme: "Basculer le thème clair/sombre",
     openLaunchpad: "Ouvrir Today",
+    openFilesView: "Parcourir les fichiers",
     documentation: "Documentation GitWand",
     whatsNew: "Nouveautés",
     reportIssue: "Signaler un problème…",
@@ -2665,6 +2669,10 @@ const fr: Locale = {
       folderClean: "Aucune modification dans ce dossier",
       folderMore: "et {0} de plus",
     },
+    dockLabel: "Parcourir",
+    breadcrumbLabel: "Emplacement",
+    scopeGone: "« {0} » n'existe plus — affichage du dépôt entier.",
+    revealFailed: "Impossible d'afficher {0}\u00a0: {1}",
   },
   secrets: {
     badgeTooltip: "{0} secret(s) potentiel(s) détecté(s) dans les changements indexés",

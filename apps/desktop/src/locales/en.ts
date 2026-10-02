@@ -119,6 +119,7 @@ const en = {
     paletteViewChanges: "View: Changes",
     paletteViewLog: "View: Log",
     paletteViewGraph: "View: Git Tree",
+    paletteViewFiles: "View: Browse files",
     // Tab strip + dropdown (v2.0)
     tabStripAddTitle: "Add a tab",
     tabStripOpenFolder: "Open folder",
@@ -1468,6 +1469,8 @@ const en = {
       showPrs: "Show PRs",
       showTerminal: "Show Terminal",
       showFiles: "Show Files",
+      itemFilesView: "Browse",
+      showFilesView: "Show Browse",
       gitTreeLocked: "Git Tree & Changes",
       lockedHint: "Always shown — cannot be removed.",
       hideChangesWhenEmpty: {
@@ -2436,6 +2439,7 @@ const en = {
     toggleSidebar: "Toggle Sidebar",
     toggleTheme: "Toggle Light/Dark Mode",
     openLaunchpad: "Open Today",
+    openFilesView: "Browse Files",
     // Help
     documentation: "GitWand Documentation",
     whatsNew: "What's New",
@@ -2696,6 +2700,10 @@ const en = {
       folderClean: "No changes below this folder",
       folderMore: "and {0} more",
     },
+    dockLabel: "Browse",
+    breadcrumbLabel: "Location",
+    scopeGone: "'{0}' no longer exists — showing the whole repo.",
+    revealFailed: "Couldn't reveal {0}: {1}",
   },
   // ─── v3.5.0 Secrets scanner ─────────────────────────────
   secrets: {

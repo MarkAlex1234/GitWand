@@ -120,6 +120,7 @@ const ptBR: Locale = {
     paletteViewChanges: "Vis\u00e3o: Altera\u00e7\u00f5es",
     paletteViewLog: "Vis\u00e3o: Hist\u00f3rico",
     paletteViewGraph: "Vis\u00e3o: \u00c1rvore Git",
+    paletteViewFiles: "Visão: Navegar pelos arquivos",
     // Tab strip + dropdown (v2.0)
     tabStripAddTitle: "Adicionar aba",
     tabStripOpenFolder: "Abrir pasta",
@@ -1443,6 +1444,8 @@ const ptBR: Locale = {
       showPrs: "Mostrar PRs",
       showTerminal: "Mostrar terminal",
       showFiles: "Mostrar arquivos",
+      itemFilesView: "Navegar",
+      showFilesView: "Mostrar Navegar",
       gitTreeLocked: "\u00c1rvore Git e Altera\u00e7\u00f5es",
       lockedHint: "Sempre vis\u00edveis \u2014 n\u00e3o podem ser removidos.",
       hideChangesWhenEmpty: {
@@ -2397,6 +2400,7 @@ const ptBR: Locale = {
     toggleSidebar: "Mostrar / ocultar barra lateral",
     toggleTheme: "Alternar modo claro/escuro",
     openLaunchpad: "Abrir Today",
+    openFilesView: "Navegar pelos arquivos",
     documentation: "Documentação do GitWand",
     whatsNew: "Novidades",
     reportIssue: "Relatar um problema…",
@@ -2655,6 +2659,10 @@ const ptBR: Locale = {
       folderClean: "Nenhuma alteração nesta pasta",
       folderMore: "e mais {0}",
     },
+    dockLabel: "Navegar",
+    breadcrumbLabel: "Local",
+    scopeGone: "\"{0}\" não existe mais — exibindo o repositório inteiro.",
+    revealFailed: "Não foi possível mostrar {0}: {1}",
   },
   secrets: {
     badgeTooltip: "{0} possível(is) segredo(s) encontrado(s) nas alterações em stage",

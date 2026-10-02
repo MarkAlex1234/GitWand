@@ -13,7 +13,7 @@
 import { computed, ref, inject, nextTick, onBeforeUnmount } from "vue";
 import type { ViewMode } from "../composables/useGitRepo";
 import { useI18n } from "../composables/useI18n";
-import { useSettings, normalizeDockOrder, isDockEntryHidden, type DockEntryId } from "../composables/useSettings";
+import { useSettings, normalizeDockOrder, isDockEntryHidden, dockEntryViewMode, type DockEntryId } from "../composables/useSettings";
 import { OPEN_SETTINGS_KEY } from "../composables/branchPickerBridge";
 
 const props = defineProps<{
@@ -63,6 +63,7 @@ function entryLabel(id: DockEntryId): string {
     case "prs": return "PRs";
     case "graph": return t("sidebar.gitTree");
     case "changes": return t("sidebar.tabChanges");
+    case "files-view": return t("filesView.dockLabel");
   }
 }
 
@@ -76,7 +77,7 @@ function isActive(id: DockEntryId): boolean {
   // History is a sub-view reached from the Git Tree (clicking a commit), so
   // it keeps the Git Tree entry highlighted.
   if (id === "graph") return props.viewMode === "graph" || props.viewMode === "history";
-  return props.viewMode === id;
+  return props.viewMode === dockEntryViewMode(id);
 }
 
 function badgeFor(id: DockEntryId): number | undefined {
@@ -202,18 +203,18 @@ function onMenuKey(e: KeyboardEvent) {
   if (e.key === "Escape") closeMenu();
 }
 
-/** Today / Dashboard / PRs can be removed; Git Tree & Changes cannot. */
+/** Today / Dashboard / PRs / Browse can be removed; Git Tree & Changes cannot. */
 function isRemovable(id: DockEntryId): boolean {
-  return id === "launchpad" || id === "dashboard" || id === "prs";
+  return id === "launchpad" || id === "dashboard" || id === "prs" || id === "files-view";
 }
 
 function isStartup(id: DockEntryId): boolean {
   return settings.value.startupView === id;
 }
 
-/** Changes has no diff-less landing, so it is not offered as a startup view. */
+/** Changes has no diff-less landing and Browse needs a repo, so neither is a startup view. */
 function canBeStartup(id: DockEntryId): boolean {
-  return id !== "changes";
+  return id !== "changes" && id !== "files-view";
 }
 
 // ── Per-target actions ──
@@ -221,11 +222,12 @@ function removeFromDock(id: DockEntryId) {
   if (id === "launchpad") patch({ dockHideLaunchpad: true });
   else if (id === "dashboard") patch({ dockHideDashboard: true });
   else if (id === "prs") patch({ dockHidePrs: true });
+  else if (id === "files-view") patch({ dockHideFilesView: true });
   closeMenu();
 }
 
 function setAsStartup(id: DockEntryId) {
-  if (id === "changes") return; // not a valid startup view
+  if (id === "changes" || id === "files-view") return; // not valid startup views
   patch({ startupView: id });
   closeMenu();
 }
@@ -372,7 +374,7 @@ onBeforeUnmount(() => {
           :class="{ 'dock-btn--active': isActive(id) }"
           :aria-pressed="isActive(id)"
           :title="entryLabel(id)"
-          @click="emit('changeView', id)"
+          @click="emit('changeView', dockEntryViewMode(id))"
           @contextmenu="openMenu($event, id)"
         >
           <!-- Today / Launchpad -->
@@ -397,6 +399,10 @@ onBeforeUnmount(() => {
           <svg v-else-if="id === 'graph'" class="dock-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" />
             <circle cx="18" cy="12" r="3" /><path d="M6 9v6" /><path d="M18 9a9 9 0 0 1-9 9" />
+          </svg>
+          <!-- Browse (Files view, v3.11.2) -->
+          <svg v-else-if="id === 'files-view'" class="dock-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 6h6l2 2h10v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" /><path d="M8 13h8" /><path d="M8 16h5" />
           </svg>
           <!-- Changes -->
           <svg v-else class="dock-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

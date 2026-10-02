@@ -64,6 +64,7 @@ const CloneModal = defineAsyncComponent(() => import("./components/CloneModal.vu
 const ForkModal = defineAsyncComponent(() => import("./components/ForkModal.vue"));
 const TerminalPanel = defineAsyncComponent(() => import("./components/TerminalPanel.vue"));
 const FileExplorerPanel = defineAsyncComponent(() => import("./components/FileExplorerPanel.vue"));
+const FilesView = defineAsyncComponent(() => import("./components/FilesView.vue"));
 const UpdateModal = defineAsyncComponent(() => import("./components/UpdateModal.vue"));
 // Shared create-branch field — only mounted inside the v-if'd create-branch
 // modal, so keep it lazy (also lazy in BranchSelector) to stay out of main.
@@ -99,7 +100,7 @@ import { useGitRepo, type ViewMode } from "./composables/useGitRepo";
 import { useWorkspaceScope } from "./composables/useWorkspaceScope";
 import { useTheme } from "./composables/useTheme";
 import { useI18n } from "./composables/useI18n";
-import { useSettings, normalizeDockOrder, isDockEntryHidden } from "./composables/useSettings";
+import { useSettings, normalizeDockOrder, isDockEntryHidden, dockEntryViewMode } from "./composables/useSettings";
 import { useNetworkStatus } from "./composables/useNetworkStatus";
 import { useConnectivity } from "./composables/useConnectivity";
 import { useScheduler } from "./composables/useScheduler";
@@ -624,7 +625,7 @@ onMounted(() => {
   const first = normalizeDockOrder(settings.value.dockOrder).find(
     (id) => !isDockEntryHidden(id, settings.value),
   );
-  if (first) viewMode.value = first as ViewMode;
+  if (first) viewMode.value = dockEntryViewMode(first);
 });
 
 // ─── Computed state ─────────────────────────────────────
@@ -2066,6 +2067,7 @@ const paletteActions = computed<PaletteAction[]>(() => {
     { id: "view-changes", label: t("header.paletteViewChanges") },
     { id: "view-log", label: t("header.paletteViewLog") },
     { id: "view-graph", label: t("header.paletteViewGraph") },
+    { id: "view-files", label: t("header.paletteViewFiles") },
   );
 
   // Overlays
@@ -2104,6 +2106,7 @@ function onPaletteAction(id: string) {
     case "view-changes": viewMode.value = "changes"; break;
     case "view-log": viewMode.value = "history"; break;
     case "view-graph": viewMode.value = "graph"; break;
+    case "view-files": viewMode.value = "files"; break;
     case "open-settings": showSettings.value = true; break;
     case "open-stash": showStash.value = true; break;
     case "open-worktrees": showWorktrees.value = true; break;
@@ -4092,6 +4095,9 @@ useAppMenu(
       // works even before a workspace is configured.
       launchpadOpenRequest.value++;
     },
+    openFilesView: () => {
+      if (hasRepo.value) onViewModeChange("files");
+    },
   },
   { hasRepo },
 );
@@ -4532,6 +4538,18 @@ onUnmounted(() => {
                 <RepoSidebar pane="history" v-bind="repoSidebarProps"
                   :visible-file-idx="graphFileIdx ?? -1" @scroll-to-file="onGraphOpenFile" />
               </aside>
+            </div>
+
+            <!-- ── Files view (v3.11.2): Finder-like tree │ read-only preview ── -->
+            <!-- keyed by repo: the tree model and the preview read their watcher once -->
+            <div v-else-if="viewMode === 'files'" class="view view--files">
+              <FilesView class="view__content"
+                :key="repoFolderPath ?? ''"
+                :repo-path="repoFolderPath ?? ''"
+                :repo-files="repoFiles"
+                :watcher="repoWatcher"
+                @open-in-editor="handleOpenInEditor"
+                @open-merge-editor="handleOpenResidual" />
             </div>
 
             <!-- Issue detail view: in-app issue review (v2.22) -->

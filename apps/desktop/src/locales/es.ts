@@ -119,6 +119,7 @@ const es: Locale = {
     paletteViewChanges: "Vista: Cambios",
     paletteViewLog: "Vista: Historial",
     paletteViewGraph: "Vista: \u00c1rbol Git",
+    paletteViewFiles: "Vista: Explorar archivos",
     // Tab strip + dropdown (v2.0)
     tabStripAddTitle: "Agregar pesta\u00f1a",
     tabStripOpenFolder: "Abrir carpeta",
@@ -1443,6 +1444,8 @@ const es: Locale = {
       showPrs: "Mostrar PRs",
       showTerminal: "Mostrar terminal",
       showFiles: "Mostrar archivos",
+      itemFilesView: "Explorar",
+      showFilesView: "Mostrar Explorar",
       gitTreeLocked: "Árbol Git y Cambios",
       lockedHint: "Siempre visibles — no se pueden quitar.",
       hideChangesWhenEmpty: {
@@ -2397,6 +2400,7 @@ const es: Locale = {
     toggleSidebar: "Mostrar / ocultar barra lateral",
     toggleTheme: "Alternar modo claro/oscuro",
     openLaunchpad: "Abrir Today",
+    openFilesView: "Explorar archivos",
     documentation: "Documentación de GitWand",
     whatsNew: "Novedades",
     reportIssue: "Reportar un problema…",
@@ -2655,6 +2659,10 @@ const es: Locale = {
       folderClean: "No hay cambios en esta carpeta",
       folderMore: "y {0} más",
     },
+    dockLabel: "Explorar",
+    breadcrumbLabel: "Ubicación",
+    scopeGone: "«{0}» ya no existe — mostrando todo el repositorio.",
+    revealFailed: "No se pudo mostrar {0}: {1}",
   },
   secrets: {
     badgeTooltip: "{0} posible(s) secreto(s) encontrado(s) en los cambios en stage",

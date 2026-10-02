@@ -184,6 +184,7 @@ interface Settings {
   dockHidePrs: boolean;
   dockHideTerminal: boolean;
   dockHideFiles: boolean;
+  dockHideFilesView: boolean;
   dockHideChangesWhenEmpty: boolean;
   dockIconsOnly: boolean;
   dockVertical: boolean;
@@ -296,6 +297,7 @@ const defaultSettings: Settings = {
   dockHidePrs: false,
   dockHideTerminal: false,
   dockHideFiles: false,
+  dockHideFilesView: false,
   dockHideChangesWhenEmpty: true,
   dockIconsOnly: false,
   dockVertical: false,
@@ -418,6 +420,7 @@ function dockEntryLabel(id: DockEntryId): string {
     case "prs": return t("settings.dock.itemPrs");
     case "graph": return t("settings.dock.itemGitTree");
     case "changes": return t("settings.dock.itemChanges");
+    case "files-view": return t("settings.dock.itemFilesView");
   }
 }
 
@@ -1642,6 +1645,16 @@ function deleteReleaseNoteTemplate(id: string) {
                 :checked="!settings.dockHideFiles"
                 @change="updateSetting('dockHideFiles', !($event.target as HTMLInputElement).checked)" />
               <span>{{ t('settings.dock.showFiles') }}</span>
+            </label>
+          </div>
+
+          <!-- Show Files view (v3.11.2) -->
+          <div class="sp-row sp-row--checkbox">
+            <label class="sp-checkbox-label" for="setting-dock-files-view">
+              <input id="setting-dock-files-view" type="checkbox" class="sp-checkbox"
+                :checked="!settings.dockHideFilesView"
+                @change="updateSetting('dockHideFilesView', !($event.target as HTMLInputElement).checked)" />
+              <span>{{ t('settings.dock.showFilesView') }}</span>
             </label>
           </div>
 
