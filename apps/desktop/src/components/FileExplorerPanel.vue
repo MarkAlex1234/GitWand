@@ -463,26 +463,42 @@ watch(
   { immediate: true },
 );
 
+// Latest side request per tab: a File request whose read is still pending is
+// void once the user asked for either side again (Diff then File, say).
+const viewRequests = new Map<string, number>();
+let viewRequestSeq = 0;
+
 async function setView(view: TabView): Promise<void> {
   const tab = activeTab.value;
   if (!tab) return;
   const repo = props.repoPath;
   const k = viewKey(tab.id);
+  const request = ++viewRequestSeq;
+  viewRequests.set(k, request);
   if (view === "diff") {
     if (canShowDiff(activeStatus.value, explorer.isDirty(tab))) tabViews.set(k, "diff");
     return;
   }
-  const leavingDiff = tabViews.get(k) === "diff";
-  tabViews.set(k, "file");
-  // The diff showed the file on disk; the buffer dates from when the tab
-  // opened. A clean buffer is re-read, and the cached editor state and blame
-  // built from the old text are dropped: for THAT tab, whichever is active by
-  // the time the read lands.
-  if (leavingDiff && (await explorer.reloadTab(repo, repo, tab.id))) {
+  if (tabViews.get(k) !== "diff") {
+    tabViews.set(k, "file");
+    if (props.repoPath === repo && activeTab.value?.id === tab.id) await mountTab(tab);
+    return;
+  }
+  // Leaving Diff. The diff showed the file on disk; the buffer dates from when
+  // the tab opened. Keep the diff on screen while a clean buffer is re-read:
+  // revealing the editor first would let an edit (or Undo) land on the old
+  // text, make the reload decline as dirty, and a save would then overwrite
+  // the newer disk file. The cached editor state and blame built from the old
+  // text are dropped for THAT tab, whichever is active by the time the read
+  // lands.
+  if (await explorer.reloadTab(repo, repo, tab.id)) {
     docStates.delete(tab.id);
     blameModels.delete(tab.id);
   }
-  if (props.repoPath === repo && activeTab.value?.id === tab.id) await mountTab(tab);
+  // Do not override a side the user chose, or a repo switched, in the meantime.
+  if (props.repoPath !== repo || tabViews.get(k) !== "diff" || viewRequests.get(k) !== request) return;
+  tabViews.set(k, "file");
+  if (activeTab.value?.id === tab.id) await mountTab(tab);
 }
 
 function diffPlaceholder(body: Extract<PreviewBody, { kind: "placeholder" }>): string {

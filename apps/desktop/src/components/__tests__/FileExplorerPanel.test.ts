@@ -790,6 +790,67 @@ describe("FileExplorerPanel — Diff | File lifecycle (v3.11.2)", () => {
     expect(vi.mocked(writeFile)).toHaveBeenCalledWith(REPO, "a.ts", "// edit\nconst a = 42;\n");
   });
 
+  it("keeps the diff on screen, and the editor locked out, until the File read lands", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    files["a.ts"] = "const a = 42;\n";
+    const gate = deferred<string>();
+    vi.mocked(readFile).mockImplementationOnce(() => gate.promise);
+    radio(en.filesView.viewFile).click();
+    await settle(3);
+    expect(diffPath()).toBe("a.ts");
+    expect(editorShown()).toBe(false);
+    gate.resolve("const a = 42;\n");
+    await settle();
+    expect(diffPath()).toBeNull();
+    expect(editorShown()).toBe(true);
+    expect(editorDoc()).toContain("const a = 42;");
+    expect(editorDoc()).not.toContain("const a = 1;");
+  });
+
+  it("File then Diff during a pending read: the tab stays on Diff", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    const gate = deferred<string>();
+    vi.mocked(readFile).mockImplementationOnce(() => gate.promise);
+    radio(en.filesView.viewFile).click();
+    await settle(3);
+    radio(en.filesView.viewDiff).click();
+    await settle(3);
+    gate.resolve("const a = 1;\n");
+    await settle();
+    expect(diffPath()).toBe("a.ts");
+    expect(editorShown()).toBe(false);
+    expect(radio(en.filesView.viewDiff).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("a repo switch during the pending read neither flips the new repo to File nor remounts it", async () => {
+    const { state } = mountPanel([MOD_A]);
+    await settle();
+    await useFileExplorer().openTab(OTHER, OTHER, "b.ts", false);
+    row("a.ts").click();
+    await settle();
+    const gate = deferred<string>();
+    vi.mocked(readFile).mockImplementationOnce(() => gate.promise);
+    radio(en.filesView.viewFile).click();
+    await settle(3);
+    state.repoPath = OTHER;
+    await settle();
+    expect(editorDoc()).toContain("const b = 2;");
+    gate.resolve("const a = 1;\n");
+    await settle();
+    expect(editorDoc()).toContain("const b = 2;");
+    state.repoPath = REPO;
+    await settle();
+    // the old repo's tab was not switched by the stale continuation
+    expect(radio(en.filesView.viewDiff).getAttribute("aria-checked")).toBe("true");
+    expect(diffPath()).toBe("a.ts");
+  });
+
   it("refreshes the tab that was reloaded, even when the user switched tabs while the read was pending", async () => {
     mountPanel([MOD_A]);
     await settle();
