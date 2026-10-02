@@ -2702,6 +2702,7 @@ const en = {
     breadcrumbLabel: "Location",
     scopeGone: "'{0}' no longer exists — showing the whole repo.",
     revealFailed: "Couldn't reveal {0}: {1}",
+    copyPathFailed: "Couldn't copy the path {0}: {1}",
   },
   // ─── v3.5.0 Secrets scanner ─────────────────────────────
   secrets: {

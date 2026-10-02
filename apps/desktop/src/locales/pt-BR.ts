@@ -2661,6 +2661,7 @@ const ptBR: Locale = {
     breadcrumbLabel: "Local",
     scopeGone: "\"{0}\" não existe mais — exibindo o repositório inteiro.",
     revealFailed: "Não foi possível mostrar {0}: {1}",
+    copyPathFailed: "Não foi possível copiar o caminho {0}: {1}",
   },
   secrets: {
     badgeTooltip: "{0} possível(is) segredo(s) encontrado(s) nas alterações em stage",

@@ -2661,6 +2661,7 @@ const es: Locale = {
     breadcrumbLabel: "Ubicación",
     scopeGone: "«{0}» ya no existe — mostrando todo el repositorio.",
     revealFailed: "No se pudo mostrar {0}: {1}",
+    copyPathFailed: "No se pudo copiar la ruta {0}: {1}",
   },
   secrets: {
     badgeTooltip: "{0} posible(s) secreto(s) encontrado(s) en los cambios en stage",

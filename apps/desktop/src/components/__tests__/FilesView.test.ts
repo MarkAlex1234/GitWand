@@ -201,4 +201,18 @@ describe("FilesView", () => {
     container.querySelector<HTMLButtonElement>(".stub-history")!.click();
     expect(events[events.length - 1]).toEqual(["open-file-history", "README.md"]);
   });
+
+  it("logs a failed Copy path instead of rejecting unhandled", async () => {
+    vi.mocked(clipboardWriteText).mockRejectedValueOnce(new Error("denied"));
+    await mount();
+    row("README.md").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    menuItem(en.filesView.ctxCopyPath).click();
+    await settle();
+    const logs = useLogs().entries.value;
+    expect(logs[logs.length - 1]).toMatchObject({
+      level: "error",
+      message: en.filesView.copyPathFailed.replace("{0}", "README.md").replace("{1}", "denied"),
+    });
+  });
 });

@@ -2671,6 +2671,7 @@ const fr: Locale = {
     breadcrumbLabel: "Emplacement",
     scopeGone: "« {0} » n'existe plus — affichage du dépôt entier.",
     revealFailed: "Impossible d'afficher {0}\u00a0: {1}",
+    copyPathFailed: "Impossible de copier le chemin {0}\u00a0: {1}",
   },
   secrets: {
     badgeTooltip: "{0} secret(s) potentiel(s) détecté(s) dans les changements indexés",

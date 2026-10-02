@@ -120,7 +120,11 @@ async function onWholeRepo(): Promise<void> {
   await clearScope();
 }
 async function onCopyPath(path: string): Promise<void> {
-  await clipboardWriteText(path);
+  try {
+    await clipboardWriteText(path);
+  } catch (err) {
+    pushLog("error", t("filesView.copyPathFailed", path, err instanceof Error ? err.message : String(err)));
+  }
 }
 async function onReveal(path: string): Promise<void> {
   try {

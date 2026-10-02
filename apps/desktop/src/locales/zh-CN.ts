@@ -2670,6 +2670,7 @@ const zhCN: Locale = {
     breadcrumbLabel: "位置",
     scopeGone: "“{0}”不再存在 — 正在显示整个仓库。",
     revealFailed: "无法显示 {0}：{1}",
+    copyPathFailed: "无法复制路径 {0}：{1}",
   },
   secrets: {
     badgeTooltip: "在暂存的更改中发现 {0} 个潜在密钥",

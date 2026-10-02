@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, toRef, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useFileExplorer, resolveFileExplorerShortcut, type FileTab } from "../composables/useFileExplorer";
-import { useLazyRepoTree, type TreeWatcher } from "../composables/useLazyRepoTree";
+import { DIR_ENTRY_CAP, useLazyRepoTree, type TreeWatcher } from "../composables/useLazyRepoTree";
 import { useSettings } from "../composables/useSettings";
 import { useI18n } from "../composables/useI18n";
 import { useDraggableResizable } from "../composables/useDraggableResizable";
@@ -512,7 +512,7 @@ function onKeyDown(e: KeyboardEvent) {
           </template>
           <span v-else-if="row.kind === 'loading'" class="file-name">{{ t('filesView.loading') }}</span>
           <span v-else-if="row.kind === 'error'" class="file-name" :title="row.message">{{ t('filesView.loadError', row.message) }}</span>
-          <span v-else class="file-name">{{ t('filesView.truncated', '5,000') }}</span>
+          <span v-else class="file-name">{{ t('filesView.truncated', DIR_ENTRY_CAP.toLocaleString()) }}</span>
         </div>
       </div>
 
