@@ -112,4 +112,28 @@ describe("useTreeScopeRoot", () => {
     await nextTick();
     expect(s.goneScope.value).toBeNull();
   });
+
+  it("keeps the scope another surface set while the check was in flight", async () => {
+    const check = deferred<boolean>();
+    vi.mocked(pathExists).mockReturnValueOnce(check.promise);
+    useWorkspaceScope().activeScope.value = "gone";
+    const { s } = setup();
+    const pending = s.onRootError();
+    useWorkspaceScope().activeScope.value = "other";
+    await nextTick();
+    check.resolve(false);
+    await pending;
+    expect(useWorkspaceScope().activeScope.value).toBe("other");
+    expect(s.goneScope.value).toBeNull();
+  });
+
+  it("drops the notice when another surface sets a new scope", async () => {
+    useWorkspaceScope().activeScope.value = "gone";
+    const { s } = setup();
+    await s.onRootError();
+    expect(s.goneScope.value).toBe("gone");
+    useWorkspaceScope().activeScope.value = "src";
+    await nextTick();
+    expect(s.goneScope.value).toBeNull();
+  });
 });

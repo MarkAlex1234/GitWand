@@ -25,6 +25,11 @@ export function useTreeScopeRoot(repoPath: Readonly<Ref<string>>) {
     goneScope.value = null;
   });
 
+  // A non-empty scope set by another surface supersedes the notice.
+  watch(root, (r) => {
+    if (r) goneScope.value = null;
+  });
+
   async function onRootError(): Promise<void> {
     const scope = root.value;
     const repo = repoPath.value;
