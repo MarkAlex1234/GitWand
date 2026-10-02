@@ -75,7 +75,7 @@ import FileExplorerPanel from "../FileExplorerPanel.vue";
 import { useFileExplorer } from "../../composables/useFileExplorer";
 import { loadCodeMirror } from "../../utils/codemirrorLibs";
 import { useTheme } from "../../composables/useTheme";
-import { listRepoDir } from "../../utils/backend";
+import { listRepoDir, readFile } from "../../utils/backend";
 
 const REPO = "/repo";
 
@@ -93,10 +93,10 @@ afterEach(() => {
   container?.remove();
 });
 
-function mountPanel() {
+function mountPanel(changedFiles: unknown[] = []) {
   const Wrapper = defineComponent({
     setup() {
-      return () => h(FileExplorerPanel, { repoPath: REPO, changedFiles: [] });
+      return () => h(FileExplorerPanel, { repoPath: REPO, changedFiles: changedFiles as never });
     },
   });
   container = document.createElement("div");
@@ -236,5 +236,22 @@ describe("FileExplorerPanel — lazy tree (v3.11.2)", () => {
     await settle();
     expect(listRepoDir).toHaveBeenCalledWith(REPO, "lib", false);
     expect(container.textContent).toContain("c.ts");
+  });
+
+  it("shows a deleted file struck through and ignores clicks on it", async () => {
+    mountPanel([{ path: "lib/gone.ts", status: "deleted", section: "unstaged" }]);
+    await settle();
+    const rows = () => [...container.querySelectorAll<HTMLElement>("[role=treeitem]")];
+    rows().find((r) => r.textContent?.includes("lib"))!.click();
+    await settle();
+    const gone = rows().find((r) => r.textContent?.includes("gone.ts"))!;
+    expect(gone.classList.contains("file-item--deleted")).toBe(true);
+    expect(gone.getAttribute("title")).toBe("Deleted");
+    vi.mocked(readFile).mockClear();
+    gone.click();
+    gone.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await settle();
+    expect(readFile).not.toHaveBeenCalled();
+    expect(useFileExplorer().tabsFor(REPO)).toHaveLength(0);
   });
 });

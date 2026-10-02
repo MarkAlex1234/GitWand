@@ -477,12 +477,13 @@ function onKeyDown(e: KeyboardEvent) {
           v-for="row in tree.rows.value"
           :key="`${row.kind}-${row.path}`"
           class="file-item"
-          :class="{ 'tree-folder': row.kind === 'folder' }"
+          :class="{ 'tree-folder': row.kind === 'folder', 'file-item--deleted': row.kind === 'file' && row.deleted }"
+          :title="row.kind === 'file' && row.deleted ? t('filesView.statusDeleted') : undefined"
           :style="{ paddingLeft: `${row.depth * 14 + (row.kind === 'folder' ? 5 : 18)}px` }"
           role="treeitem"
           tabindex="0"
-          @click="row.kind === 'folder' ? tree.toggle(row.path) : row.kind === 'file' ? onFileClick(row.path) : row.kind === 'error' ? tree.retry(row.path) : undefined"
-          @dblclick="row.kind === 'file' && onFileDblClick(row.path)"
+          @click="row.kind === 'folder' ? tree.toggle(row.path) : row.kind === 'file' ? (row.deleted ? undefined : onFileClick(row.path)) : row.kind === 'error' ? tree.retry(row.path) : undefined"
+          @dblclick="row.kind === 'file' && !row.deleted && onFileDblClick(row.path)"
         >
           <template v-if="row.kind === 'folder'">
             <svg
@@ -840,4 +841,6 @@ function onKeyDown(e: KeyboardEvent) {
    added to apps/desktop/src/assets/main.css in Step 1, also used by
    RepoSidebar.vue's tree layout. Do not re-add them locally. */
 
+.file-item--deleted { opacity: 0.6; }
+.file-item--deleted .file-name { text-decoration: line-through; }
 </style>

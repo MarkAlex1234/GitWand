@@ -2610,8 +2610,6 @@ const fr: Locale = {
     headerTooltip: "Ouvrir l'explorateur de fichiers",
     emptyHint: "Cliquez sur un fichier dans l'arbre pour l'ouvrir",
     binaryPlaceholder: "Ce fichier n'est pas du texte — l'aperçu binaire n'est pas encore pris en charge",
-    truncatedBadge: "Tronqué",
-    truncatedTooltip: "Ce repo a plus de fichiers qu'il n'est possible d'afficher — la liste a été plafonnée",
     menuHideOnNav: "Masquer au changement de menu",
     menuLayout: "Disposition",
     modeFullscreen: "Plein écran",

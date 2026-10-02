@@ -147,6 +147,7 @@ _Synthesis: none of the three addresses structured conflict-resolution AI (Stran
 - **Dedicated `git_conflict_history` Rust command** — one IPC round-trip and a real process timeout, if the `gitExec` round-trips of v3.11.1 prove slow.
 - **Honor `.gitwandrc` `llmFallback.model` / `maxTokens` on the desktop** — ignored today in favour of the app's AI settings.
 - **Files view follow-ups** (out of scope for v3.11.2, spec §10). The view is deliberately read-only. Not done: editing in the view, stage/unstage from the view, file operations (rename, delete, create), and tree-wide name search beyond type-ahead over the visible rows. Each needs its own design: editing would have to coexist with the File Explorer panel's tabs, and search with a 5,000-per-folder listing cap.
+- **Keyboard navigation in the File Explorer panel's tree.** Its rows have `tabindex` but no key handling. The Files view's `fileTreeKeymap` could be reused.
 - **Live Repo watcher blind spot on ignored folders.** The watcher drops events under `node_modules`, `target`, `dist`, `.venv` and `__pycache__`, so an ignored folder expanded with "Show ignored" in the Files view does not refresh live. Collapsing and re-expanding it re-lists it.
 
 ---

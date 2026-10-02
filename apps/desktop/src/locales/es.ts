@@ -2600,8 +2600,6 @@ const es: Locale = {
     headerTooltip: "Abrir explorador de archivos",
     emptyHint: "Haz clic en un archivo del árbol para abrirlo",
     binaryPlaceholder: "Este archivo no es texto — la vista previa binaria aún no es compatible",
-    truncatedBadge: "Truncado",
-    truncatedTooltip: "Este repo tiene más archivos de los que se pueden mostrar — la lista se limitó",
     menuHideOnNav: "Ocultar al cambiar de menú",
     menuLayout: "Diseño",
     modeFullscreen: "Pantalla completa",
