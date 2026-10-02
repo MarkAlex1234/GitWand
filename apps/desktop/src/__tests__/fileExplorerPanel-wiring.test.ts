@@ -28,4 +28,13 @@ describe("App.vue — File Explorer panel wiring", () => {
     expect(panel).toMatch(/@open-in-editor="handleOpenInEditor"/);
     expect(panel).toMatch(/@request-close-tab="onRequestCloseFileTab"/);
   });
+  it("hands conflicted files to the merge editor and history to the Changes view", () => {
+    expect(panel).toMatch(/@open-merge-editor="\(p: string\) => \{ hideFilesOnHandoff\(\); handleOpenResidual\(p\); \}"/);
+    expect(panel).toMatch(
+      /@open-file-history="\(p: string\) => \{ hideFilesOnHandoff\(\); openFileHistory\(p\); viewMode = 'changes'; \}"/,
+    );
+    expect(appVue).toMatch(
+      /function hideFilesOnHandoff\(\): void \{\n\s*if \(showFiles\.value && settings\.value\.filesHideOnNav\) showFiles\.value = false;/,
+    );
+  });
 });

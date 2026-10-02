@@ -2691,7 +2691,7 @@ const en = {
       tooLarge: "Too large to preview ({0})",
       binary: "Not a text file ({0})",
       nonUtf8: "Not UTF-8 text ({0})",
-      noTextDiff: "No textual changes to show ({0})",
+      noTextDiff: "No textual changes to show",
       gone: "Deleted from disk",
       symlink: "Symbolic link — GitWand does not follow it",
       folderChanged: "{0} changed files below this folder",
@@ -2703,6 +2703,10 @@ const en = {
     scopeGone: "'{0}' no longer exists — showing the whole repo.",
     revealFailed: "Couldn't reveal {0}: {1}",
     copyPathFailed: "Couldn't copy the path {0}: {1}",
+    viewLabel: "Show",
+    viewDiff: "Diff",
+    viewFile: "File",
+    diffNeedsSave: "Save to see the diff",
   },
   // ─── v3.5.0 Secrets scanner ─────────────────────────────
   secrets: {

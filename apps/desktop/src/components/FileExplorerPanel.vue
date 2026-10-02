@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed, ref, toRef, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
+import { computed, reactive, ref, toRef, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import FileTreePane from "./FileTreePane.vue";
+import DiffViewer from "./DiffViewer.vue";
 import { useFileExplorer, resolveFileExplorerShortcut, type FileTab } from "../composables/useFileExplorer";
 import { useLazyRepoTree, type TreeWatcher } from "../composables/useLazyRepoTree";
 import { useTreeScopeRoot } from "../composables/useTreeScopeRoot";
+import { formatBytes, useFilePreview, type PreviewBody, type PreviewTarget } from "../composables/useFilePreview";
+import { canShowDiff, initialTabView, isDiffable, visibleTabView, type TabView } from "../composables/explorerTabView";
+import type { DiffMode } from "../utils/diffMode";
 import { useSettings } from "../composables/useSettings";
 import { useI18n } from "../composables/useI18n";
 import { useLogs } from "../composables/useLogs";
 import { useDraggableResizable } from "../composables/useDraggableResizable";
 import type { RepoFileEntry } from "../composables/useGitRepo";
-import { clipboardWriteText, getGitBlame, listRepoDir, revealInFileManager } from "../utils/backend";
+import { clipboardWriteText, getGitBlame, getGitDiff, listRepoDir, readFileAtRevision, revealInFileManager } from "../utils/backend";
 import { buildBlameModel, type BlameGutterEntry } from "../composables/useBlameGutter";
 import { useCodeMirror } from "../composables/useCodeMirror";
 import { peekCodeMirror } from "../utils/codemirrorLibs";
@@ -27,6 +31,10 @@ const emit = defineEmits<{
   (e: "request-close-tab", tabId: number): void;
   /** v3.11.2 — context menu "Open in editor": App opens the configured external editor. */
   (e: "open-in-editor", path: string): void;
+  /** v3.11.2 — the conflicted banner: App opens the merge editor in the Changes view. */
+  (e: "open-merge-editor", path: string): void;
+  /** v3.11.2 — DiffViewer's history button: App opens the file history in the Changes view. */
+  (e: "open-file-history", path: string): void;
 }>();
 
 const { t } = useI18n();
@@ -381,6 +389,74 @@ function onToolbarSave() {
   explorer.saveTab(props.repoPath, props.repoPath, activeTab.value.id);
 }
 
+// ── Diff | File (v3.11.2) ──
+// A tab on a changed file opens on its inline diff; the toolbar toggle
+// switches to the editor and back. What a tab shows is
+// `resolveTabView(stored side, status)`. The side is stored the first time the
+// panel shows the tab, so a file that becomes changed while open does not
+// flip its tab. The diff reads the disk, which is why a dirty buffer cannot
+// switch to it (canShowDiff).
+const tabViews = reactive(new Map<number, TabView>());
+const activeStatus = computed(() =>
+  activeTab.value ? (tree.statusByPath.value.get(activeTab.value.path) ?? null) : null,
+);
+const activeDiffable = computed(() => isDiffable(activeStatus.value));
+const showDiff = computed(
+  () =>
+    activeTab.value !== null &&
+    visibleTabView(tabViews.get(activeTab.value.id), activeStatus.value, explorer.isDirty(activeTab.value)) === "diff",
+);
+const diffBlocked = computed(
+  () => activeTab.value !== null && !canShowDiff(activeStatus.value, explorer.isDirty(activeTab.value)),
+);
+
+const previewTarget = computed<PreviewTarget | null>(() => {
+  const tab = activeTab.value;
+  const status = activeStatus.value;
+  if (!tab || !status || !showDiff.value) return null;
+  // `size` only lets planPreview refuse a huge untracked file before diffing
+  // it. A tab does not know its size, and the Rust diff truncates at 5 MB.
+  return { kind: "file", path: tab.path, size: 0, symlink: false, status };
+});
+// Request-id race guard and stale-while-revalidate watcher reload come with
+// useFilePreview: a response for an earlier tab, side or repo is dropped.
+const preview = useFilePreview({
+  cwd: repoPathRef,
+  target: previewTarget,
+  loaders: {
+    readFile: (cwd, path) => readFileAtRevision(cwd, "", path),
+    getDiff: getGitDiff,
+  },
+  watcher: props.watcher ?? null,
+});
+const diffBody = preview.body;
+const diffSide = preview.side;
+const canSwitchSide = computed(() => preview.plan.value?.kind === "diff" && preview.plan.value.canSwitch);
+/** DiffViewer's own inline / side-by-side toggle; the panel starts inline. */
+const diffMode = ref<DiffMode>("inline");
+
+watch(
+  () => activeTab.value?.id ?? null,
+  (id) => {
+    if (id !== null && !tabViews.has(id)) tabViews.set(id, initialTabView(activeStatus.value));
+  },
+  { immediate: true },
+);
+
+function setView(view: TabView): void {
+  const tab = activeTab.value;
+  if (!tab) return;
+  if (view === "diff" && !canShowDiff(activeStatus.value, explorer.isDirty(tab))) return;
+  tabViews.set(tab.id, view);
+  if (view === "file") void mountTab(tab);
+}
+
+function diffPlaceholder(body: Extract<PreviewBody, { kind: "placeholder" }>): string {
+  return body.reason === "too-large"
+    ? t("filesView.preview.tooLarge", formatBytes(body.size))
+    : t("filesView.preview.noTextDiff");
+}
+
 watch(activeTab, (tab) => {
   if (tab) mountTab(tab);
 });
@@ -392,6 +468,7 @@ watch(
       if (!ids.includes(id)) {
         docStates.delete(id);
         blameModels.delete(id);
+        tabViews.delete(id);
       }
     }
   },
@@ -461,7 +538,7 @@ function onKeyDown(e: KeyboardEvent) {
           <span>{{ t("files.toolbarSave") }}</span>
         </button>
         <span class="fe__header-divider" aria-hidden="true" />
-        <button class="fe__action-btn" :disabled="editLocked" :title="t('files.toolbarUndo')" @click="onUndo">
+        <button class="fe__action-btn" :disabled="editLocked || showDiff" :title="t('files.toolbarUndo')" @click="onUndo">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M3 7v6h6"/>
             <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>
@@ -471,7 +548,7 @@ function onKeyDown(e: KeyboardEvent) {
         <button
           class="fe__action-btn"
           :class="{ 'fe__action-btn--active': blameEnabled }"
-          :disabled="!activeTab || activeTab.binary || explorer.isDirty(activeTab)"
+          :disabled="!activeTab || activeTab.binary || explorer.isDirty(activeTab) || showDiff"
           :title="t('files.toolbarBlame')"
           @click="toggleBlame"
         >
@@ -482,6 +559,43 @@ function onKeyDown(e: KeyboardEvent) {
           </svg>
           <span>{{ t("files.toolbarBlame") }}</span>
         </button>
+        <template v-if="activeTab && activeDiffable">
+          <span class="fe__header-divider" aria-hidden="true" />
+          <div class="fe__seg" role="radiogroup" :aria-label="t('filesView.viewLabel')">
+            <button
+              type="button"
+              role="radio"
+              class="fe__seg-btn"
+              :aria-checked="showDiff"
+              :aria-disabled="diffBlocked ? 'true' : undefined"
+              :title="diffBlocked ? t('filesView.diffNeedsSave') : undefined"
+              @click="setView('diff')"
+            >{{ t('filesView.viewDiff') }}</button>
+            <button
+              type="button"
+              role="radio"
+              class="fe__seg-btn"
+              :aria-checked="!showDiff"
+              @click="setView('file')"
+            >{{ t('filesView.viewFile') }}</button>
+          </div>
+          <div v-if="showDiff && canSwitchSide" class="fe__seg" role="radiogroup" :aria-label="t('filesView.preview.sideLabel')">
+            <button
+              type="button"
+              role="radio"
+              class="fe__seg-btn"
+              :aria-checked="diffSide === 'worktree'"
+              @click="diffSide = 'worktree'"
+            >{{ t('filesView.preview.sideWorktree') }}</button>
+            <button
+              type="button"
+              role="radio"
+              class="fe__seg-btn"
+              :aria-checked="diffSide === 'index'"
+              @click="diffSide = 'index'"
+            >{{ t('filesView.preview.sideIndex') }}</button>
+          </div>
+        </template>
       </div>
       <div class="fe__header-spacer" />
       <button
@@ -545,8 +659,32 @@ function onKeyDown(e: KeyboardEvent) {
             <span class="fe__tab-close" @click.stop="onTabClose(tab.id)">✕</span>
           </button>
         </div>
-        <div v-show="activeTab && !activeTab.binary" class="fe__content" ref="editorHost"></div>
-        <div v-if="activeTab && activeTab.binary" class="fe__empty">{{ t("files.binaryPlaceholder") }}</div>
+        <div v-show="activeTab && !activeTab.binary && !showDiff" class="fe__content" ref="editorHost"></div>
+        <div v-if="activeTab && activeTab.binary && !showDiff" class="fe__empty">{{ t("files.binaryPlaceholder") }}</div>
+        <div v-if="activeTab && showDiff" class="fe__diff">
+          <p v-if="diffBody.kind === 'idle' || diffBody.kind === 'loading'" class="fe__empty" aria-busy="true">{{ t('filesView.loading') }}</p>
+          <div v-else-if="diffBody.kind === 'error'" class="fe__empty fe__empty--stack fe__empty--error" role="alert">
+            <span>{{ t('filesView.preview.error', diffBody.message) }}</span>
+            <button type="button" class="fe__action-btn" @click="preview.retry()">{{ t('filesView.retry') }}</button>
+          </div>
+          <div v-else-if="diffBody.kind === 'conflicted'" class="fe__empty fe__empty--stack">
+            <span>{{ t('filesView.preview.conflicted') }}</span>
+            <button
+              type="button"
+              class="fe__action-btn fe__action-btn--active"
+              @click="emit('open-merge-editor', activeTab.path)"
+            >{{ t('filesView.preview.openMergeEditor') }}</button>
+          </div>
+          <p v-else-if="diffBody.kind === 'placeholder'" class="fe__empty">{{ diffPlaceholder(diffBody) }}</p>
+          <DiffViewer
+            v-else-if="diffBody.kind === 'diff'"
+            v-model:diff-mode="diffMode"
+            :diff="diffBody.diff"
+            :file-path="activeTab.path"
+            @open-in-editor="(p: string) => emit('open-in-editor', p)"
+            @open-file-history="(p: string) => emit('open-file-history', p)"
+          />
+        </div>
         <div v-if="!activeTab" class="fe__empty">{{ t("files.emptyHint") }}</div>
       </div>
     </div>
@@ -868,5 +1006,47 @@ function onKeyDown(e: KeyboardEvent) {
   align-items: center;
   justify-content: center;
   color: var(--color-text-muted);
+}
+
+.fe__empty--stack {
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.fe__empty--error {
+  color: var(--color-danger);
+}
+
+.fe__diff {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.fe__seg {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.fe__seg-btn {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.fe__seg-btn[aria-checked="true"] {
+  color: var(--color-text);
+  background: var(--color-bg-tertiary);
+}
+
+.fe__seg-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
 }
 </style>

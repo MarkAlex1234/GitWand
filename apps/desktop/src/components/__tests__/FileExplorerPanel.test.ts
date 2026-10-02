@@ -31,6 +31,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createApp, defineComponent, h, KeepAlive, nextTick, reactive, type App } from "vue";
 import en from "../../locales/en";
+import fr from "../../locales/fr";
+import es from "../../locales/es";
+import ptBR from "../../locales/pt-BR";
+import zhCN from "../../locales/zh-CN";
 import type { RepoDirEntry } from "../../utils/backend";
 import type { RepoFileEntry } from "../../composables/useGitRepo";
 
@@ -109,13 +113,29 @@ vi.mock("@tanstack/vue-virtual", async () => {
   };
 });
 
+// DiffViewer's rendering is its own concern: a stub that shows which diff it got and re-emits.
+vi.mock("../DiffViewer.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { diff: Object, filePath: String, diffMode: String },
+      emits: ["open-file-history", "open-in-editor", "update:diffMode"],
+      setup: (p, { emit }) => () =>
+        h("div", { class: "stub-diff", "data-path": (p.diff as { path?: string } | undefined)?.path ?? "" }, [
+          h("button", { class: "stub-history", onClick: () => emit("open-file-history", p.filePath) }),
+          h("button", { class: "stub-editor", onClick: () => emit("open-in-editor", p.filePath) }),
+        ]),
+    }),
+  };
+});
+
 import FileExplorerPanel from "../FileExplorerPanel.vue";
 import { useFileExplorer } from "../../composables/useFileExplorer";
 import { useWorkspaceScope } from "../../composables/useWorkspaceScope";
 import { useLogs } from "../../composables/useLogs";
 import { loadCodeMirror } from "../../utils/codemirrorLibs";
 import { useTheme } from "../../composables/useTheme";
-import { clipboardWriteText, listRepoDir, pathExists, readFile, revealInFileManager } from "../../utils/backend";
+import { clipboardWriteText, getGitDiff, listRepoDir, pathExists, readFile, revealInFileManager } from "../../utils/backend";
 
 const REPO = "/repo";
 const OTHER = "/other";
@@ -183,6 +203,20 @@ const lastLog = () => {
   const logs = useLogs().entries.value;
   return logs[logs.length - 1];
 };
+
+const MOD_A: RepoFileEntry = { path: "a.ts", status: "modified", section: "unstaged" };
+const MOD_B: RepoFileEntry = { path: "b.ts", status: "modified", section: "unstaged" };
+const radio = (label: string) =>
+  [...container.querySelectorAll<HTMLElement>("[role=radio]")].find((b) => b.textContent?.trim() === label)!;
+const diffPath = () => container.querySelector(".stub-diff")?.getAttribute("data-path") ?? null;
+const editorShown = () => (container.querySelector(".fe__content") as HTMLElement).style.display !== "none";
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
 
 /**
  * Let every pending microtask AND macrotask drain.
@@ -498,5 +532,191 @@ describe("FileExplorerPanel — scope (v3.11.2)", () => {
     await settle();
     expect(useWorkspaceScope().activeScope.value).toBe("gone");
     expect(rows()[0]?.textContent).toContain("Directory not found: gone");
+  });
+});
+
+describe("FileExplorerPanel — Diff | File (v3.11.2)", () => {
+  it("a changed file opens on its diff", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    expect(getGitDiff).toHaveBeenCalledWith(REPO, "a.ts", false);
+    expect(diffPath()).toBe("a.ts");
+    expect(editorShown()).toBe(false);
+    expect(radio(en.filesView.viewDiff).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("an unchanged file opens in the editor, with no toggle", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    row("b.ts").click();
+    await settle();
+    expect(editorShown()).toBe(true);
+    expect(editorDoc()).toContain("const b = 2;");
+    expect(container.querySelector("[role=radio]")).toBeNull();
+    expect(getGitDiff).not.toHaveBeenCalled();
+  });
+
+  it("Diff | File switches to the editor and back", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    radio(en.filesView.viewFile).click();
+    await settle();
+    expect(diffPath()).toBeNull();
+    expect(editorShown()).toBe(true);
+    expect(editorDoc()).toContain("const a = 1;");
+    radio(en.filesView.viewDiff).click();
+    await settle();
+    expect(diffPath()).toBe("a.ts");
+    expect(getGitDiff).toHaveBeenCalledTimes(2);
+  });
+
+  it("the Diff side is disabled while the buffer has unsaved edits", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    radio(en.filesView.viewFile).click();
+    await settle();
+    await typeIntoEditor("EDITED ");
+    const diffBtn = radio(en.filesView.viewDiff);
+    expect(diffBtn.getAttribute("aria-disabled")).toBe("true");
+    expect(diffBtn.getAttribute("title")).toBe(en.filesView.diffNeedsSave);
+    diffBtn.click();
+    await settle();
+    expect(diffPath()).toBeNull();
+    expect(editorShown()).toBe(true);
+    expect(editorDoc()).toContain("EDITED ");
+  });
+
+  it("offers Working tree | Index for a file both staged and modified", async () => {
+    mountPanel([
+      { path: "a.ts", status: "modified", section: "staged" },
+      { path: "a.ts", status: "modified", section: "unstaged" },
+    ]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    expect(diffPath()).toBe("a.ts");
+    radio(en.filesView.preview.sideIndex).click();
+    await settle();
+    expect(getGitDiff).toHaveBeenLastCalledWith(REPO, "a.ts", true);
+    expect(diffPath()).toBe("a.ts@index");
+  });
+
+  it("a conflicted file shows the merge-editor banner, never a diff", async () => {
+    const { events } = mountPanel([{ path: "a.ts", status: "modified", section: "conflicted" }]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    expect(getGitDiff).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(en.filesView.preview.conflicted);
+    [...container.querySelectorAll<HTMLButtonElement>(".fe__diff button")]
+      .find((b) => b.textContent?.trim() === en.filesView.preview.openMergeEditor)!
+      .click();
+    expect(events[events.length - 1]).toEqual(["open-merge-editor", "a.ts"]);
+  });
+
+  it("a failed diff shows an inline error with Retry", async () => {
+    vi.mocked(getGitDiff).mockRejectedValueOnce(new Error("boom"));
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    expect(container.querySelector(".fe__diff")?.textContent).toContain(en.filesView.preview.error.replace("{0}", "boom"));
+    [...container.querySelectorAll<HTMLButtonElement>(".fe__diff button")]
+      .find((b) => b.textContent?.trim() === en.filesView.retry)!
+      .click();
+    await settle();
+    expect(diffPath()).toBe("a.ts");
+  });
+
+  it("re-emits the diff's open-in-editor and file-history requests", async () => {
+    const { events } = mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    container.querySelector<HTMLButtonElement>(".stub-editor")!.click();
+    expect(events[events.length - 1]).toEqual(["open-in-editor", "a.ts"]);
+    container.querySelector<HTMLButtonElement>(".stub-history")!.click();
+    expect(events[events.length - 1]).toEqual(["open-file-history", "a.ts"]);
+  });
+
+  it("a File tab stays on File when its file becomes changed", async () => {
+    const { state } = mountPanel([]);
+    await settle();
+    row("b.ts").click();
+    await settle();
+    state.changedFiles = [MOD_B];
+    await settle();
+    expect(radio(en.filesView.viewFile).getAttribute("aria-checked")).toBe("true");
+    expect(diffPath()).toBeNull();
+    expect(editorShown()).toBe(true);
+    expect(getGitDiff).not.toHaveBeenCalled();
+  });
+
+  it("a diff that resolves after switching to File is dropped", async () => {
+    const late = deferred<unknown>();
+    vi.mocked(getGitDiff).mockImplementationOnce(() => late.promise as never);
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    radio(en.filesView.viewFile).click();
+    await settle();
+    late.resolve({ path: "late", hunks: [HUNK] });
+    await settle();
+    expect(diffPath()).toBeNull();
+    expect(editorShown()).toBe(true);
+    radio(en.filesView.viewDiff).click();
+    await settle();
+    expect(diffPath()).toBe("a.ts");
+  });
+
+  it("a diff for an earlier tab is dropped", async () => {
+    const late = deferred<unknown>();
+    vi.mocked(getGitDiff).mockImplementationOnce(() => late.promise as never);
+    mountPanel([MOD_A, MOD_B]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    row("b.ts").click();
+    await settle();
+    late.resolve({ path: "late-a", hunks: [HUNK] });
+    await settle();
+    expect(diffPath()).toBe("b.ts");
+  });
+
+  it("survives a repo switch inside KeepAlive: the new repo's tree and tabs, never the old repo's late diff", async () => {
+    const late = deferred<unknown>();
+    vi.mocked(getGitDiff).mockImplementationOnce(() => late.promise as never);
+    const { state } = mountPanel([MOD_A], { keepAlive: true });
+    await settle();
+    await useFileExplorer().openTab(OTHER, OTHER, "a.ts", false);
+    row("a.ts").click();
+    await settle();
+    state.shown = false; // KeepAlive deactivates the panel; it is not unmounted
+    await settle();
+    state.repoPath = OTHER;
+    state.shown = true;
+    await settle();
+    expect(listRepoDir).toHaveBeenCalledWith(OTHER, "", false);
+    expect(getGitDiff).toHaveBeenLastCalledWith(OTHER, "a.ts", false);
+    late.resolve({ path: "late-from-repo", hunks: [HUNK] });
+    await settle();
+    expect(diffPath()).toBe("a.ts");
+  });
+
+  it("has the toggle's strings in all five locales", () => {
+    for (const loc of [en, fr, es, ptBR, zhCN]) {
+      expect(loc.filesView.viewLabel).toBeTruthy();
+      expect(loc.filesView.viewDiff).toBeTruthy();
+      expect(loc.filesView.viewFile).toBeTruthy();
+      expect(loc.filesView.diffNeedsSave).toBeTruthy();
+      expect(loc.filesView.preview.noTextDiff).not.toContain("{0}");
+    }
   });
 });

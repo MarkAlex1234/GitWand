@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { canShowDiff, initialTabView, isDiffable, resolveTabView } from "../explorerTabView";
+import { canShowDiff, initialTabView, isDiffable, resolveTabView, visibleTabView } from "../explorerTabView";
 import type { FileStatusInfo } from "../useLazyRepoTree";
 
 const status = (over: Partial<FileStatusInfo> = {}): FileStatusInfo => ({
@@ -38,5 +38,18 @@ describe("explorerTabView", () => {
     expect(canShowDiff(status(), false)).toBe(true);
     expect(canShowDiff(status(), true)).toBe(false);
     expect(canShowDiff(null, false)).toBe(false);
+  });
+
+  it("a dirty tab with a stored diff view shows the File side", () => {
+    expect(visibleTabView("diff", status(), false)).toBe("diff");
+    expect(visibleTabView("diff", status(), true)).toBe("file");
+    expect(visibleTabView(undefined, status(), true)).toBe("file");
+    expect(visibleTabView("diff", null, false)).toBe("file");
+  });
+
+  it("isDiffable is a plain boolean: a deleted-on-disk status stays non-null in the false branch", () => {
+    const s = status({ status: "deleted", deletedOnDisk: true });
+    const ok: boolean = isDiffable(s);
+    if (!ok) expect(s.deletedOnDisk).toBe(true); // would not type-check if the false branch narrowed to null
   });
 });

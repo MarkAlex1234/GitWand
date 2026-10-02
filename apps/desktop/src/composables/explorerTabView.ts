@@ -13,7 +13,7 @@ import type { FileStatusInfo } from "./useLazyRepoTree";
 export type TabView = "diff" | "file";
 
 /** A diff exists to show: the file is changed (conflicted included) and still on disk. */
-export function isDiffable(status: FileStatusInfo | null): status is FileStatusInfo {
+export function isDiffable(status: FileStatusInfo | null): boolean {
   return status !== null && !status.deletedOnDisk;
 }
 
@@ -34,4 +34,9 @@ export function resolveTabView(stored: TabView | undefined, status: FileStatusIn
  */
 export function canShowDiff(status: FileStatusInfo | null, dirty: boolean): boolean {
   return isDiffable(status) && !dirty;
+}
+
+/** What the panel actually shows: the resolved side, but File while the buffer is dirty. */
+export function visibleTabView(stored: TabView | undefined, status: FileStatusInfo | null, dirty: boolean): TabView {
+  return resolveTabView(stored, status) === "diff" && canShowDiff(status, dirty) ? "diff" : "file";
 }

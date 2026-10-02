@@ -2246,6 +2246,15 @@ function toggleFiles() {
   if (opening && showTerminal.value && settings.value.terminalHideOnNav) showTerminal.value = false;
 }
 
+/**
+ * v3.11.2 — the panel hands a file to the Changes view (merge editor, file
+ * history). That is a navigation like a dock switch, so the same
+ * `filesHideOnNav` rule dismisses the panel, which would otherwise cover it.
+ */
+function hideFilesOnHandoff(): void {
+  if (showFiles.value && settings.value.filesHideOnNav) showFiles.value = false;
+}
+
 async function onRequestCloseFileTab(tabId: number) {
   if (!repoFolderPath.value) return;
   const tab = fileExplorer.tabsFor(repoFolderPath.value).find((t) => t.id === tabId);
@@ -4591,6 +4600,8 @@ onUnmounted(() => {
           @close="showFiles = false"
           @request-close-tab="onRequestCloseFileTab"
           @open-in-editor="handleOpenInEditor"
+          @open-merge-editor="(p: string) => { hideFilesOnHandoff(); handleOpenResidual(p); }"
+          @open-file-history="(p: string) => { hideFilesOnHandoff(); openFileHistory(p); viewMode = 'changes'; }"
         />
       </KeepAlive>
 
