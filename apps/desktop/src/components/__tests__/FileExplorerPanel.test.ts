@@ -29,12 +29,26 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { createApp, defineComponent, h, KeepAlive, nextTick, reactive, type App } from "vue";
+import en from "../../locales/en";
+import type { RepoDirEntry } from "../../utils/backend";
+import type { RepoFileEntry } from "../../composables/useGitRepo";
 
 const files: Record<string, string> = {
   "a.ts": "const a = 1;\n",
   "b.ts": "const b = 2;\n",
 };
+
+const FS: Record<string, RepoDirEntry[]> = {
+  "": [
+    { name: "lib", path: "lib", kind: "dir", ignored: false, size: 0 },
+    { name: "a.ts", path: "a.ts", kind: "file", ignored: false, size: 13 },
+    { name: "b.ts", path: "b.ts", kind: "file", ignored: false, size: 13 },
+  ],
+  lib: [{ name: "c.ts", path: "lib/c.ts", kind: "file", ignored: false, size: 1 }],
+};
+
+const HUNK = { header: "@@ -1 +1 @@", oldStart: 1, oldCount: 1, newStart: 1, newCount: 1, lines: [] };
 
 vi.mock("../../utils/backend", () => ({
   readFile: vi.fn(async (_cwd: string, path: string) => {
@@ -43,21 +57,11 @@ vi.mock("../../utils/backend", () => ({
     return content;
   }),
   writeFile: vi.fn(async () => {}),
-  listRepoTree: vi.fn(async () => ({
-    node: { name: "", path: "", isDir: true, children: [] },
-    truncated: false,
-  })),
-  listRepoDir: vi.fn(async (_cwd: string, dir: string) => ({
-    entries:
-      dir === ""
-        ? [
-            { name: "lib", path: "lib", kind: "dir", ignored: false, size: 0 },
-            { name: "a.ts", path: "a.ts", kind: "file", ignored: false, size: 13 },
-            { name: "b.ts", path: "b.ts", kind: "file", ignored: false, size: 13 },
-          ]
-        : [{ name: "c.ts", path: "lib/c.ts", kind: "file", ignored: false, size: 1 }],
-    truncated: false,
-  })),
+  listRepoDir: vi.fn(async (_cwd: string, dir: string) => {
+    const entries = FS[dir];
+    if (!entries) throw new Error(`Directory not found: ${dir}`);
+    return { entries, truncated: false };
+  }),
   getGitBlame: vi.fn(async () => [
     {
       line: 1,
@@ -69,41 +73,116 @@ vi.mock("../../utils/backend", () => ({
     },
   ]),
   openInEditor: vi.fn(async () => {}),
+  revealInFileManager: vi.fn(async () => {}),
+  clipboardWriteText: vi.fn(async () => {}),
+  pathExists: vi.fn(async () => false),
+  workspaceRead: vi.fn(async () => {
+    throw new Error("no workspace file");
+  }),
+  workspaceWrite: vi.fn(async () => {}),
+  getGitDiff: vi.fn(async (_cwd: string, path: string, staged: boolean) => ({
+    path: staged ? `${path}@index` : path,
+    hunks: [HUNK],
+  })),
+  readFileAtRevision: vi.fn(async () => ({ bytesBase64: "", byteLength: 0, mime: "text/plain", absent: false })),
 }));
+// jsdom has no layout: a virtualizer that renders every row (a UI-library stand-in).
+vi.mock("@tanstack/vue-virtual", async () => {
+  const { shallowRef, triggerRef } = await import("vue");
+  return {
+    useVirtualizer: (options: { count: number }) => {
+      const inst = {
+        options,
+        setOptions(next: { count: number }) {
+          Object.assign(inst.options, next);
+          triggerRef(r);
+        },
+        getVirtualItems: () =>
+          Array.from({ length: inst.options.count }, (_, i) => ({ index: i, key: i, start: i * 24, size: 24 })),
+        getTotalSize: () => inst.options.count * 24,
+        measureElement: () => {},
+        scrollToIndex: () => {},
+      };
+      const r = shallowRef(inst);
+      return r;
+    },
+  };
+});
 
 import FileExplorerPanel from "../FileExplorerPanel.vue";
 import { useFileExplorer } from "../../composables/useFileExplorer";
+import { useWorkspaceScope } from "../../composables/useWorkspaceScope";
+import { useLogs } from "../../composables/useLogs";
 import { loadCodeMirror } from "../../utils/codemirrorLibs";
 import { useTheme } from "../../composables/useTheme";
-import { listRepoDir, readFile } from "../../utils/backend";
+import { clipboardWriteText, listRepoDir, pathExists, readFile, revealInFileManager } from "../../utils/backend";
 
 const REPO = "/repo";
+const OTHER = "/other";
+const REVEAL_LABELS: string[] = [en.filesView.ctxRevealMac, en.filesView.ctxRevealWindows, en.filesView.ctxRevealLinux];
 
 let app: App | null = null;
 let container: HTMLElement;
 
 beforeEach(() => {
   localStorage.clear();
+  // Back to each vi.fn's own implementation, "once" queues included.
+  vi.resetAllMocks();
   useFileExplorer().disposeRepo(REPO);
+  useFileExplorer().disposeRepo(OTHER);
+  useWorkspaceScope().activeScope.value = null;
+  useLogs().clearLogs();
 });
 
 afterEach(() => {
   app?.unmount();
   app = null;
   container?.remove();
+  useWorkspaceScope().activeScope.value = null;
+  files["a.ts"] = "const a = 1;\n";
 });
 
-function mountPanel(changedFiles: unknown[] = []) {
+/**
+ * Mount the panel behind a reactive state, so a test can change the repo, the
+ * changed files or the panel's visibility the way App.vue does. `keepAlive`
+ * wraps it in a KeepAlive like App.vue:4585.
+ */
+function mountPanel(changedFiles: RepoFileEntry[] = [], opts: { keepAlive?: boolean } = {}) {
+  const state = reactive({ repoPath: REPO, changedFiles, shown: true });
+  const events: Array<[string, ...unknown[]]> = [];
+  const on = (name: string) => (...args: unknown[]) => {
+    events.push([name, ...args]);
+  };
+  const panel = () =>
+    state.shown
+      ? h(FileExplorerPanel, {
+          repoPath: state.repoPath,
+          changedFiles: state.changedFiles,
+          onOpenInEditor: on("open-in-editor"),
+          onOpenMergeEditor: on("open-merge-editor"),
+          onOpenFileHistory: on("open-file-history"),
+        })
+      : null;
   const Wrapper = defineComponent({
-    setup() {
-      return () => h(FileExplorerPanel, { repoPath: REPO, changedFiles: changedFiles as never });
-    },
+    setup: () => () => (opts.keepAlive ? h(KeepAlive, null, { default: panel }) : panel()),
   });
   container = document.createElement("div");
   document.body.appendChild(container);
   app = createApp(Wrapper);
   app.mount(container);
+  return { state, events };
 }
+
+const rows = () => [...container.querySelectorAll<HTMLElement>("[role=treeitem]")];
+const row = (name: string) => rows().find((r) => r.querySelector(".ftp__name")?.textContent === name)!;
+const tree = () => container.querySelector<HTMLElement>("[role=tree]")!;
+const key = (k: string) => tree().dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+const menuItems = () => [...document.querySelectorAll<HTMLElement>("[role=menuitem]")];
+const menuItem = (label: string) => menuItems().find((b) => b.textContent?.trim() === label)!;
+const lastLog = () => {
+  const logs = useLogs().entries.value;
+  return logs[logs.length - 1];
+};
 
 /**
  * Let every pending microtask AND macrotask drain.
@@ -226,32 +305,160 @@ describe("FileExplorerPanel — editor wiring", () => {
   });
 });
 
-describe("FileExplorerPanel — lazy tree (v3.11.2)", () => {
+describe("FileExplorerPanel — tree (v3.11.2)", () => {
   it("lists the root through listRepoDir and a folder only when it is opened", async () => {
     mountPanel();
     await settle();
     expect(listRepoDir).toHaveBeenCalledWith(REPO, "", false);
-    const folder = [...container.querySelectorAll<HTMLElement>("[role=treeitem]")].find((r) => r.textContent?.includes("lib"))!;
-    folder.click();
+    expect(listRepoDir).not.toHaveBeenCalledWith(REPO, "lib", false);
+    row("lib").click();
     await settle();
     expect(listRepoDir).toHaveBeenCalledWith(REPO, "lib", false);
-    expect(container.textContent).toContain("c.ts");
+    expect(row("c.ts")).toBeTruthy();
   });
 
-  it("shows a deleted file struck through and ignores clicks on it", async () => {
+  it("shows a deleted file struck through and never opens it", async () => {
     mountPanel([{ path: "lib/gone.ts", status: "deleted", section: "unstaged" }]);
     await settle();
-    const rows = () => [...container.querySelectorAll<HTMLElement>("[role=treeitem]")];
-    rows().find((r) => r.textContent?.includes("lib"))!.click();
+    row("lib").click();
     await settle();
-    const gone = rows().find((r) => r.textContent?.includes("gone.ts"))!;
-    expect(gone.classList.contains("file-item--deleted")).toBe(true);
-    expect(gone.getAttribute("title")).toBe("Deleted");
+    const gone = row("gone.ts");
+    expect(gone.classList.contains("ftp__row--deleted")).toBe(true);
     vi.mocked(readFile).mockClear();
     gone.click();
     gone.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await settle();
     expect(readFile).not.toHaveBeenCalled();
     expect(useFileExplorer().tabsFor(REPO)).toHaveLength(0);
+  });
+
+  it("a click opens the preview tab and a double click pins it", async () => {
+    mountPanel();
+    await settle();
+    row("a.ts").click();
+    await settle();
+    expect(useFileExplorer().tabsFor(REPO).map((t) => [t.path, t.pinned])).toEqual([["a.ts", false]]);
+    row("a.ts").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await settle();
+    expect(useFileExplorer().tabsFor(REPO).map((t) => [t.path, t.pinned])).toEqual([["a.ts", true]]);
+  });
+
+  it("Enter opens the file under the cursor; the arrow keys alone open nothing", async () => {
+    mountPanel();
+    await settle();
+    key("ArrowDown"); // lib
+    key("ArrowDown"); // a.ts
+    await settle();
+    expect(useFileExplorer().tabsFor(REPO)).toHaveLength(0);
+    key("Enter");
+    await settle();
+    expect(useFileExplorer().tabsFor(REPO).map((t) => [t.path, t.pinned])).toEqual([["a.ts", false]]);
+  });
+
+  it("Show ignored re-lists the tree with ignored entries", async () => {
+    mountPanel();
+    await settle();
+    const box = container.querySelector<HTMLInputElement>(".ftp__ignored input")!;
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    await settle();
+    expect(listRepoDir).toHaveBeenCalledWith(REPO, "", true);
+  });
+});
+
+describe("FileExplorerPanel — context menu (v3.11.2)", () => {
+  async function openMenuOn(name: string) {
+    mountPanel();
+    await settle();
+    row(name).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+  }
+
+  it("Open in editor hands the file to App's external editor", async () => {
+    const { events } = mountPanel();
+    await settle();
+    row("a.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    menuItem(en.filesView.ctxOpenInEditor).click();
+    expect(events[events.length - 1]).toEqual(["open-in-editor", "a.ts"]);
+  });
+
+  it("Copy path writes the repo-relative path", async () => {
+    await openMenuOn("a.ts");
+    menuItem(en.filesView.ctxCopyPath).click();
+    await settle();
+    expect(clipboardWriteText).toHaveBeenCalledWith("a.ts");
+  });
+
+  it("logs a failed Copy path instead of rejecting unhandled", async () => {
+    vi.mocked(clipboardWriteText).mockRejectedValueOnce(new Error("denied"));
+    await openMenuOn("a.ts");
+    menuItem(en.filesView.ctxCopyPath).click();
+    await settle();
+    expect(lastLog()).toMatchObject({
+      level: "error",
+      message: en.filesView.copyPathFailed.replace("{0}", "a.ts").replace("{1}", "denied"),
+    });
+  });
+
+  it("Reveal hands the path to the file manager, and logs a failure", async () => {
+    vi.mocked(revealInFileManager).mockRejectedValueOnce(new Error("Path not found: a.ts"));
+    await openMenuOn("a.ts");
+    menuItems().find((b) => REVEAL_LABELS.includes(b.textContent?.trim() ?? ""))!.click();
+    await settle();
+    expect(revealInFileManager).toHaveBeenCalledWith(REPO, "a.ts");
+    expect(lastLog()).toMatchObject({
+      level: "error",
+      message: en.filesView.revealFailed.replace("{0}", "a.ts").replace("{1}", "Path not found: a.ts"),
+    });
+  });
+});
+
+describe("FileExplorerPanel — scope (v3.11.2)", () => {
+  it("'Scope here' sets the workspace scope and re-roots the tree on it", async () => {
+    mountPanel();
+    await settle();
+    row("lib").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    menuItem(en.filesView.ctxScopeHere).click();
+    await settle();
+    expect(useWorkspaceScope().activeScope.value).toBe("lib");
+    expect(listRepoDir).toHaveBeenLastCalledWith(REPO, "lib", false);
+    expect(row("c.ts")).toBeTruthy();
+    expect(container.querySelector(".fe__scope")?.textContent).toContain(en.scope.active.replace("{0}", "lib"));
+  });
+
+  it("roots the tree at the active scope, and 'Whole repo' clears it", async () => {
+    useWorkspaceScope().activeScope.value = "lib";
+    mountPanel();
+    await settle();
+    expect(listRepoDir).toHaveBeenCalledWith(REPO, "lib", false);
+    expect(row("a.ts")).toBeUndefined();
+    [...container.querySelectorAll<HTMLButtonElement>(".fe__scope button")]
+      .find((b) => b.textContent?.trim() === en.scope.wholeRepo)!
+      .click();
+    await settle();
+    expect(useWorkspaceScope().activeScope.value).toBeNull();
+    expect(listRepoDir).toHaveBeenLastCalledWith(REPO, "", false);
+    expect(container.querySelector(".fe__scope")).toBeNull();
+  });
+
+  it("falls back to the whole repo, with a notice, when the scope folder is gone", async () => {
+    useWorkspaceScope().activeScope.value = "gone";
+    mountPanel();
+    await settle();
+    expect(pathExists).toHaveBeenCalledWith(REPO, "gone");
+    expect(useWorkspaceScope().activeScope.value).toBeNull();
+    expect(container.textContent).toContain(en.filesView.scopeGone.replace("{0}", "gone"));
+    expect(listRepoDir).toHaveBeenLastCalledWith(REPO, "", false);
+  });
+
+  it("keeps the scope when its folder exists but cannot be listed", async () => {
+    vi.mocked(pathExists).mockResolvedValue(true);
+    useWorkspaceScope().activeScope.value = "gone";
+    mountPanel();
+    await settle();
+    expect(useWorkspaceScope().activeScope.value).toBe("gone");
+    expect(rows()[0]?.textContent).toContain("Directory not found: gone");
   });
 });

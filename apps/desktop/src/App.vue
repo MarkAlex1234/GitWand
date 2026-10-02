@@ -4590,6 +4590,7 @@ onUnmounted(() => {
           :watcher="repoWatcher"
           @close="showFiles = false"
           @request-close-tab="onRequestCloseFileTab"
+          @open-in-editor="handleOpenInEditor"
         />
       </KeepAlive>
 

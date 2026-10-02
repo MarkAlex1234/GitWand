@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, toRef, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
+import FileTreePane from "./FileTreePane.vue";
 import { useFileExplorer, resolveFileExplorerShortcut, type FileTab } from "../composables/useFileExplorer";
-import { DIR_ENTRY_CAP, useLazyRepoTree, type TreeWatcher } from "../composables/useLazyRepoTree";
+import { useLazyRepoTree, type TreeWatcher } from "../composables/useLazyRepoTree";
+import { useTreeScopeRoot } from "../composables/useTreeScopeRoot";
 import { useSettings } from "../composables/useSettings";
 import { useI18n } from "../composables/useI18n";
+import { useLogs } from "../composables/useLogs";
 import { useDraggableResizable } from "../composables/useDraggableResizable";
 import type { RepoFileEntry } from "../composables/useGitRepo";
-import { getGitBlame, listRepoDir } from "../utils/backend";
+import { clipboardWriteText, getGitBlame, listRepoDir, revealInFileManager } from "../utils/backend";
 import { buildBlameModel, type BlameGutterEntry } from "../composables/useBlameGutter";
 import { useCodeMirror } from "../composables/useCodeMirror";
 import { peekCodeMirror } from "../utils/codemirrorLibs";
@@ -22,25 +25,31 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "request-close-tab", tabId: number): void;
+  /** v3.11.2 — context menu "Open in editor": App opens the configured external editor. */
+  (e: "open-in-editor", path: string): void;
 }>();
 
 const { t } = useI18n();
+const { pushLog } = useLogs();
 const { settings, saveSettings } = useSettings();
 const explorer = useFileExplorer();
 
 const repoPathRef = toRef(props, "repoPath");
 const changedFilesRef = toRef(props, "changedFiles");
-// Lazy, live tree (v3.11.2): replaces the one-shot 20,000-entry list_repo_tree
-// load. Its own storage prefix keeps the panel's expansion separate from the
-// Files view's.
+// Lazy, live tree (v3.11.2), rooted at the workspace scope when one is
+// active. The panel lives in a KeepAlive and is not remounted on a repo
+// switch: the tree and the scope check both follow `repoPath` instead.
+const scope = useTreeScopeRoot(repoPathRef);
 const tree = useLazyRepoTree({
   repoPath: repoPathRef,
-  root: ref(""),
+  root: scope.root,
   repoFiles: changedFilesRef,
   listDir: (dir, includeIgnored) => listRepoDir(props.repoPath, dir, includeIgnored),
   watcher: props.watcher ?? null,
+  onRootError: () => void scope.onRootError(),
   storageKeyPrefix: "gitwand-explorer-tree:",
 });
+const repoName = computed(() => props.repoPath.split(/[\\/]/).filter(Boolean).pop() ?? props.repoPath);
 
 const tabs = computed(() => explorer.tabsFor(props.repoPath));
 const activeId = computed(() => explorer.activeTabId(props.repoPath));
@@ -104,12 +113,26 @@ const panelStyle = computed(() => {
   };
 });
 
-async function onFileClick(path: string) {
-  await explorer.openTab(props.repoPath, props.repoPath, path, false);
+/** A click or Enter opens the preview tab; a double click pins it (FileTreePane's `activate`). */
+async function onActivate(path: string, pinned: boolean) {
+  tree.selected.value = path;
+  await explorer.openTab(props.repoPath, props.repoPath, path, pinned);
 }
 
-async function onFileDblClick(path: string) {
-  await explorer.openTab(props.repoPath, props.repoPath, path, true);
+async function onCopyPath(path: string): Promise<void> {
+  try {
+    await clipboardWriteText(path);
+  } catch (err) {
+    pushLog("error", t("filesView.copyPathFailed", path, err instanceof Error ? err.message : String(err)));
+  }
+}
+
+async function onReveal(path: string): Promise<void> {
+  try {
+    await revealInFileManager(props.repoPath, path);
+  } catch (err) {
+    pushLog("error", t("filesView.revealFailed", path, err instanceof Error ? err.message : String(err)));
+  }
 }
 
 function onTabClick(tabId: number) {
@@ -472,48 +495,32 @@ function onKeyDown(e: KeyboardEvent) {
     </div>
 
     <div class="fe__body">
-      <div class="fe__tree" role="tree">
-        <div
-          v-for="row in tree.rows.value"
-          :key="`${row.kind}-${row.path}`"
-          class="file-item"
-          :class="{ 'tree-folder': row.kind === 'folder', 'file-item--deleted': row.kind === 'file' && row.deleted }"
-          :title="row.kind === 'file' && row.deleted ? t('filesView.statusDeleted') : undefined"
-          :style="{ paddingLeft: `${row.depth * 14 + (row.kind === 'folder' ? 5 : 18)}px` }"
-          role="treeitem"
-          tabindex="0"
-          @click="row.kind === 'folder' ? tree.toggle(row.path) : row.kind === 'file' ? (row.deleted ? undefined : onFileClick(row.path)) : row.kind === 'error' ? tree.retry(row.path) : undefined"
-          @dblclick="row.kind === 'file' && !row.deleted && onFileDblClick(row.path)"
-        >
-          <template v-if="row.kind === 'folder'">
-            <svg
-              class="tree-chevron"
-              :class="{ 'tree-chevron--collapsed': !row.expanded }"
-              width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
-            >
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-            <svg class="tree-folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M3 5h6l2 2h10v12H3z" />
-            </svg>
-            <span class="file-name mono tree-folder-name">{{ row.name }}</span>
-            <span v-if="row.badge" class="tree-folder-count">{{ row.badge.changed }}</span>
-          </template>
-          <template v-else-if="row.kind === 'file'">
-            <span
-              v-if="row.status"
-              class="file-status-dot"
-              :class="`file-status-dot--${row.status.status}`"
-              :title="row.status.status"
-            />
-            <span class="file-name mono">{{ row.name }}</span>
-          </template>
-          <span v-else-if="row.kind === 'loading'" class="file-name">{{ t('filesView.loading') }}</span>
-          <span v-else-if="row.kind === 'error'" class="file-name" :title="row.message">{{ t('filesView.loadError', row.message) }}</span>
-          <span v-else class="file-name">{{ t('filesView.truncated', DIR_ENTRY_CAP.toLocaleString()) }}</span>
+      <div class="fe__tree-col">
+        <div v-if="scope.root.value" class="fe__scope" role="group" :aria-label="t('scope.picker')">
+          <span class="fe__scope-path mono" :title="scope.root.value">{{ t('scope.active', scope.root.value) }}</span>
+          <button type="button" class="fe__action-btn" @click="scope.wholeRepo()">{{ t('scope.wholeRepo') }}</button>
         </div>
+        <p v-if="scope.goneScope.value" class="fe__scope-notice" role="status">
+          {{ t('filesView.scopeGone', scope.goneScope.value) }}
+        </p>
+        <FileTreePane
+          class="fe__tree"
+          :rows="tree.rows.value"
+          :selected-path="tree.selected.value"
+          :show-ignored="tree.showIgnored.value"
+          :label="scope.root.value || repoName"
+          @select="(p: string) => { tree.selected.value = p; }"
+          @activate="onActivate"
+          @toggle="(p: string) => void tree.toggle(p)"
+          @expand="(p: string) => void tree.expand(p)"
+          @collapse="(p: string) => tree.collapse(p)"
+          @retry="(d: string) => void tree.retry(d)"
+          @update:show-ignored="(v: boolean) => { tree.showIgnored.value = v; }"
+          @scope-here="(p: string) => void scope.scopeHere(p)"
+          @copy-path="onCopyPath"
+          @reveal="onReveal"
+          @open-in-editor="(p: string) => emit('open-in-editor', p)"
+        />
       </div>
 
       <div class="fe__editor-pane">
@@ -731,10 +738,43 @@ function onKeyDown(e: KeyboardEvent) {
   min-height: 0;
 }
 
-.fe__tree {
+.fe__tree-col {
   width: 220px;
   flex-shrink: 0;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fe__tree {
+  flex: 1;
+  min-height: 0;
+}
+
+.fe__scope {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+  font-size: var(--font-size-xs);
+}
+
+.fe__scope-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fe__scope-notice {
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
   border-right: 1px solid var(--color-border);
 }
 
@@ -821,26 +861,4 @@ function onKeyDown(e: KeyboardEvent) {
   justify-content: center;
   color: var(--color-text-muted);
 }
-
-.file-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--color-text-muted);
-}
-
-.file-status-dot--added { background: var(--color-status-added); }
-.file-status-dot--modified { background: var(--color-status-modified, var(--color-accent)); }
-.file-status-dot--deleted { background: var(--color-danger); }
-.file-status-dot--renamed { background: var(--color-status-added); }
-
-/* Tree row classes (.file-item, .tree-folder, .tree-chevron,
-   .tree-folder-icon, .tree-folder-name, .tree-folder-count, .file-name) are
-   intentionally NOT defined here — they come from the shared global rules
-   added to apps/desktop/src/assets/main.css in Step 1, also used by
-   RepoSidebar.vue's tree layout. Do not re-add them locally. */
-
-.file-item--deleted { opacity: 0.6; }
-.file-item--deleted .file-name { text-decoration: line-through; }
 </style>
