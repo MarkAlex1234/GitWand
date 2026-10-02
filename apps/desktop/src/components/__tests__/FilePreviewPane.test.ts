@@ -18,7 +18,14 @@ vi.mock("../DiffViewer.vue", async () => {
   return {
     default: defineComponent({
       props: { diff: Object, filePath: String, diffMode: String },
-      setup: (p) => () => h("div", { class: "stub-diff", "data-mode": p.diffMode }, String(p.filePath)),
+      emits: ["update:diffMode", "open-in-editor", "open-file-history"],
+      setup: (p, { emit }) => () =>
+        h("div", { class: "stub-diff", "data-mode": p.diffMode }, [
+          String(p.filePath),
+          h("button", { class: "stub-mode", onClick: () => emit("update:diffMode", "side-by-side") }),
+          h("button", { class: "stub-editor", onClick: () => emit("open-in-editor", p.filePath) }),
+          h("button", { class: "stub-history", onClick: () => emit("open-file-history", p.filePath) }),
+        ]),
     }),
   };
 });
@@ -86,6 +93,7 @@ async function mount(target: PreviewTarget | null, changedBelow: string[] = []) 
           onOpenInEditor: on("open-in-editor"),
           onReveal: on("reveal"),
           onOpenMergeEditor: on("open-merge-editor"),
+          onOpenFileHistory: on("open-file-history"),
         }),
     }),
   );
@@ -191,5 +199,23 @@ describe("FilePreviewPane — errors and header", () => {
     const crumb = [...container.querySelectorAll<HTMLButtonElement>(".fpp__crumb")].find((b) => b.textContent === "lib")!;
     crumb.click();
     expect(events[events.length - 1]).toEqual(["select-path", "src/lib"]);
+  });
+});
+
+describe("FilePreviewPane — DiffViewer header controls", () => {
+  it("binds the diff mode, and forwards open-in-editor and file history", async () => {
+    const events = await mount(file("a.ts", st({ unstaged: true })));
+    const diff = () => container.querySelector(".stub-diff")!;
+    expect(diff().getAttribute("data-mode")).toBe("inline");
+
+    container.querySelector<HTMLButtonElement>(".stub-mode")!.click();
+    await settle();
+    expect(diff().getAttribute("data-mode")).toBe("side-by-side");
+
+    container.querySelector<HTMLButtonElement>(".stub-editor")!.click();
+    expect(events[events.length - 1]).toEqual(["open-in-editor", "a.ts"]);
+
+    container.querySelector<HTMLButtonElement>(".stub-history")!.click();
+    expect(events[events.length - 1]).toEqual(["open-file-history", "a.ts"]);
   });
 });

@@ -6,7 +6,7 @@
  * Unchanged files render in a read-only CodeEditor; changed files in the
  * inline DiffViewer, never editable or selectable from here.
  */
-import { computed, toRef } from "vue";
+import { computed, ref, toRef } from "vue";
 import CodeEditor from "./CodeEditor.vue";
 import DiffViewer from "./DiffViewer.vue";
 import { useI18n } from "../composables/useI18n";
@@ -14,6 +14,7 @@ import { formatBytes, useFilePreview, type PreviewTarget } from "../composables/
 import type { TreeWatcher } from "../composables/useLazyRepoTree";
 import { getGitDiff, readFileAtRevision } from "../utils/backend";
 import { revealLabelKey } from "../utils/revealLabel";
+import type { DiffMode } from "../utils/diffMode";
 
 /** A folder summary lists at most this many paths, then "and N more". */
 const FOLDER_LIST_LIMIT = 500;
@@ -31,6 +32,7 @@ const emit = defineEmits<{
   "open-in-editor": [path: string];
   reveal: [path: string];
   "open-merge-editor": [path: string];
+  "open-file-history": [path: string];
 }>();
 
 const { t } = useI18n();
@@ -47,6 +49,8 @@ const preview = useFilePreview({
 const body = preview.body;
 const plan = preview.plan;
 const side = preview.side;
+/** DiffViewer's own header toggle; the preview starts inline, like the Changes view. */
+const diffMode = ref<DiffMode>("inline");
 
 const segments = computed(() => {
   const parts = (props.target?.path ?? "").split("/").filter(Boolean);
@@ -174,7 +178,14 @@ const revealLabel = computed(() => t(revealLabelKey()));
       <div v-else-if="body.kind === 'text'" class="fpp__code">
         <CodeEditor :model-value="body.content" :file-path="target.path" readonly :aria-label="target.path" />
       </div>
-      <DiffViewer v-else-if="body.kind === 'diff'" :diff="body.diff" :file-path="target.path" diff-mode="inline" />
+      <DiffViewer
+        v-else-if="body.kind === 'diff'"
+        v-model:diff-mode="diffMode"
+        :diff="body.diff"
+        :file-path="target.path"
+        @open-in-editor="(p: string) => emit('open-in-editor', p)"
+        @open-file-history="(p: string) => emit('open-file-history', p)"
+      />
     </div>
   </section>
 </template>

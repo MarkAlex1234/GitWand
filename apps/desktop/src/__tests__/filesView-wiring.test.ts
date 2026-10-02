@@ -25,6 +25,8 @@ describe("App.vue — Files view wiring", () => {
     expect(branch).toMatch(/:key="repoFolderPath/);
     expect(branch).toMatch(/@open-in-editor="handleOpenInEditor"/);
     expect(branch).toMatch(/@open-merge-editor="handleOpenResidual"/);
+    // FileHistoryViewer lives in the Changes view: the Files view hands off there.
+    expect(branch).toMatch(/@open-file-history="\(p: string\) => \{ openFileHistory\(p\); viewMode = 'changes'; \}"/);
   });
 
   it("offers it in the palette and the native menu", () => {

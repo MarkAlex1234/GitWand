@@ -29,6 +29,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "open-in-editor": [path: string];
   "open-merge-editor": [path: string];
+  "open-file-history": [path: string];
 }>();
 
 const { t } = useI18n();
@@ -184,6 +185,7 @@ function onSelectPath(path: string): void {
         @open-in-editor="(p: string) => emit('open-in-editor', p)"
         @reveal="onReveal"
         @open-merge-editor="(p: string) => emit('open-merge-editor', p)"
+        @open-file-history="(p: string) => emit('open-file-history', p)"
       />
     </div>
   </section>

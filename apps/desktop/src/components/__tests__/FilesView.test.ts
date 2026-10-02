@@ -32,7 +32,7 @@ vi.mock("../../utils/backend", () => ({
   }),
   workspaceWrite: vi.fn(async () => {}),
   readFileAtRevision: vi.fn(async () => ({ bytesBase64: Buffer.from("hello").toString("base64"), byteLength: 5, mime: "text/plain", absent: false })),
-  getGitDiff: vi.fn(async () => ({ path: "x", hunks: [] })),
+  getGitDiff: vi.fn(async () => ({ path: "x", hunks: [] as unknown[] })),
 }));
 vi.mock("@tanstack/vue-virtual", async () => {
   const { shallowRef, triggerRef } = await import("vue");
@@ -56,7 +56,16 @@ vi.mock("@tanstack/vue-virtual", async () => {
 });
 vi.mock("../DiffViewer.vue", async () => {
   const { defineComponent, h } = await import("vue");
-  return { default: defineComponent({ setup: () => () => h("div", { class: "stub-diff" }) }) };
+  return {
+    default: defineComponent({
+      props: { filePath: String },
+      emits: ["open-file-history"],
+      setup: (p, { emit }) => () =>
+        h("div", { class: "stub-diff" }, [
+          h("button", { class: "stub-history", onClick: () => emit("open-file-history", p.filePath) }),
+        ]),
+    }),
+  };
 });
 vi.mock("../CodeEditor.vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -64,7 +73,8 @@ vi.mock("../CodeEditor.vue", async () => {
 });
 
 import FilesView from "../FilesView.vue";
-import { listRepoDir, pathExists, readFileAtRevision, revealInFileManager } from "../../utils/backend";
+import { clipboardWriteText, getGitDiff, listRepoDir, pathExists, readFileAtRevision, revealInFileManager } from "../../utils/backend";
+import type { RepoFileEntry } from "../../composables/useGitRepo";
 import { useWorkspaceScope } from "../../composables/useWorkspaceScope";
 import { useLogs } from "../../composables/useLogs";
 
@@ -93,16 +103,24 @@ async function settle() {
   }
 }
 
-async function mount() {
+async function mount(repoFiles: RepoFileEntry[] = []) {
+  const events: Array<[string, ...unknown[]]> = [];
   container = document.createElement("div");
   document.body.appendChild(container);
   app = createApp(
     defineComponent({
-      setup: () => () => h(FilesView, { repoPath: "/repo", repoFiles: [], watcher: null }),
+      setup: () => () =>
+        h(FilesView, {
+          repoPath: "/repo",
+          repoFiles,
+          watcher: null,
+          "onOpenFileHistory": (p: string) => events.push(["open-file-history", p]),
+        }),
     }),
   );
   app.mount(container);
   await settle();
+  return events;
 }
 
 const row = (name: string) =>
@@ -170,5 +188,17 @@ describe("FilesView", () => {
     await settle();
     expect(readFileAtRevision).toHaveBeenCalledWith("/repo", "", "README.md");
     expect(container.querySelector(".stub-code")?.textContent).toBe("hello");
+  });
+
+  it("re-emits the diff preview's file-history request", async () => {
+    vi.mocked(getGitDiff).mockResolvedValueOnce({
+      path: "README.md",
+      hunks: [{ header: "@@", oldStart: 1, oldCount: 1, newStart: 1, newCount: 1, lines: [] }],
+    } as never);
+    const events = await mount([{ path: "README.md", status: "modified", section: "unstaged" }]);
+    row("README.md").click();
+    await settle();
+    container.querySelector<HTMLButtonElement>(".stub-history")!.click();
+    expect(events[events.length - 1]).toEqual(["open-file-history", "README.md"]);
   });
 });

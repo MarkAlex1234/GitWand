@@ -4549,7 +4549,8 @@ onUnmounted(() => {
                 :repo-files="repoFiles"
                 :watcher="repoWatcher"
                 @open-in-editor="handleOpenInEditor"
-                @open-merge-editor="handleOpenResidual" />
+                @open-merge-editor="handleOpenResidual"
+                @open-file-history="(p: string) => { openFileHistory(p); viewMode = 'changes'; }" />
             </div>
 
             <!-- Issue detail view: in-app issue review (v2.22) -->
