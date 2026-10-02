@@ -730,6 +730,7 @@ pub fn run() {
             commands::files::folder_diff,
             commands::files::list_dir,
             commands::files::list_repo_tree,
+            commands::files::list_repo_dir,
             commands::secrets::scan_secrets,
             commands::read::git_status,
             commands::read::git_diff,

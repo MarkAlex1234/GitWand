@@ -194,6 +194,31 @@ pub struct RepoTreeResult {
     pub truncated: bool,
 }
 
+// ─── One working-tree directory (Files view, v3.11.2) ─────────────
+
+/// One entry of `list_repo_dir`. `path` is repo-relative with `/` separators.
+/// `ignored` means "matched by an ignore rule and not tracked". `size` is the
+/// byte length for files, and 0 for directories and symlinks, which are never
+/// followed. The preview reads it to refuse a huge file without reading it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoDirEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: String, // "file" | "dir" | "symlink"
+    pub ignored: bool,
+    pub size: u64,
+}
+
+/// Result of `list_repo_dir`. `truncated` is set when the directory had more
+/// than `MAX_REPO_DIR_ENTRIES` listable entries.
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoDirListing {
+    pub entries: Vec<RepoDirEntry>,
+    pub truncated: bool,
+}
+
 // ─── Directory listing types ──────────────────────────────────────
 
 #[derive(Serialize)]
