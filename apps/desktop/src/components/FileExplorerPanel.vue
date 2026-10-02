@@ -449,22 +449,41 @@ const canSwitchSide = computed(() => preview.plan.value?.kind === "diff" && prev
 /** DiffViewer's own inline / side-by-side toggle; the panel starts inline. */
 const diffMode = ref<DiffMode>("inline");
 
+// Record a tab's side the first time it is shown. When its file stops having
+// a diff to show (committed, discarded, deleted on disk), store File, so the
+// next change does not flip the tab back to the diff under the cursor.
 watch(
-  () => [activeTab.value?.id ?? null, props.repoPath, statusPending.value] as const,
-  ([id, , pending]) => {
+  () => [activeTab.value?.id ?? null, props.repoPath, statusPending.value, isDiffable(activeStatus.value)] as const,
+  ([id, , pending, diffable]) => {
     if (id === null || pending) return;
     const k = viewKey(id);
-    if (!tabViews.has(k)) tabViews.set(k, initialTabView(activeStatus.value));
+    const stored = tabViews.get(k);
+    if (stored === undefined) tabViews.set(k, initialTabView(activeStatus.value));
+    else if (stored === "diff" && !diffable) void setView("file");
   },
   { immediate: true },
 );
 
-function setView(view: TabView): void {
+async function setView(view: TabView): Promise<void> {
   const tab = activeTab.value;
   if (!tab) return;
-  if (view === "diff" && !canShowDiff(activeStatus.value, explorer.isDirty(tab))) return;
-  tabViews.set(viewKey(tab.id), view);
-  if (view === "file") void mountTab(tab);
+  const repo = props.repoPath;
+  const k = viewKey(tab.id);
+  if (view === "diff") {
+    if (canShowDiff(activeStatus.value, explorer.isDirty(tab))) tabViews.set(k, "diff");
+    return;
+  }
+  const leavingDiff = tabViews.get(k) === "diff";
+  tabViews.set(k, "file");
+  // The diff showed the file on disk; the buffer dates from when the tab
+  // opened. A clean buffer is re-read, and the cached editor state and blame
+  // built from the old text are dropped: for THAT tab, whichever is active by
+  // the time the read lands.
+  if (leavingDiff && (await explorer.reloadTab(repo, repo, tab.id))) {
+    docStates.delete(tab.id);
+    blameModels.delete(tab.id);
+  }
+  if (props.repoPath === repo && activeTab.value?.id === tab.id) await mountTab(tab);
 }
 
 function diffPlaceholder(body: Extract<PreviewBody, { kind: "placeholder" }>): string {
@@ -685,6 +704,7 @@ function onKeyDown(e: KeyboardEvent) {
             <span class="fe__tab-close" @click.stop="onTabClose(tab.id)">✕</span>
           </button>
         </div>
+        <p v-if="activeTab && activeStatus?.deletedOnDisk" class="fe__notice" role="status">{{ t('filesView.preview.gone') }}</p>
         <div v-show="activeTab && !activeTab.binary && !showDiff" class="fe__content" ref="editorHost"></div>
         <div v-if="activeTab && activeTab.binary && !showDiff" class="fe__empty">{{ t("files.binaryPlaceholder") }}</div>
         <div v-if="activeTab && showDiff" class="fe__diff">
@@ -988,6 +1008,14 @@ function onKeyDown(e: KeyboardEvent) {
   height: 6px;
   border-radius: 50%;
   background: var(--color-accent);
+}
+
+.fe__notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-5);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .fe__content {

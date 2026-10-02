@@ -135,7 +135,7 @@ import { useWorkspaceScope } from "../../composables/useWorkspaceScope";
 import { useLogs } from "../../composables/useLogs";
 import { loadCodeMirror } from "../../utils/codemirrorLibs";
 import { useTheme } from "../../composables/useTheme";
-import { clipboardWriteText, getGitDiff, listRepoDir, pathExists, readFile, revealInFileManager } from "../../utils/backend";
+import { clipboardWriteText, getGitDiff, listRepoDir, pathExists, readFile, revealInFileManager, writeFile } from "../../utils/backend";
 
 const REPO = "/repo";
 const OTHER = "/other";
@@ -760,5 +760,91 @@ describe("FileExplorerPanel — Diff | File (v3.11.2)", () => {
       expect(loc.filesView.diffNeedsSave).toBeTruthy();
       expect(loc.filesView.preview.noTextDiff).not.toContain("{0}");
     }
+  });
+});
+
+describe("FileExplorerPanel — Diff | File lifecycle (v3.11.2)", () => {
+  it("switching to File re-reads a clean tab from disk", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    files["a.ts"] = "const a = 42;\n"; // changed on disk while the tab showed its diff
+    radio(en.filesView.viewFile).click();
+    await settle();
+    expect(editorDoc()).toContain("const a = 42;");
+    expect(editorDoc()).not.toContain("const a = 1;");
+  });
+
+  it("a save after the switch writes the fresh buffer, not the stale one", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    files["a.ts"] = "const a = 42;\n";
+    radio(en.filesView.viewFile).click();
+    await settle();
+    await typeIntoEditor("// edit\n");
+    const explorer = useFileExplorer();
+    const tab = explorer.tabsFor(REPO)[0];
+    await explorer.saveTab(REPO, REPO, tab.id);
+    expect(vi.mocked(writeFile)).toHaveBeenCalledWith(REPO, "a.ts", "// edit\nconst a = 42;\n");
+  });
+
+  it("refreshes the tab that was reloaded, even when the user switched tabs while the read was pending", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    await openTab("b.ts");
+    await openTab("a.ts");
+    const explorer = useFileExplorer();
+    const tabA = explorer.tabsFor(REPO).find((t) => t.path === "a.ts")!;
+    const tabB = explorer.tabsFor(REPO).find((t) => t.path === "b.ts")!;
+    expect(diffPath()).toBe("a.ts");
+    files["a.ts"] = "const a = 42;\n";
+    const gate = deferred<string>();
+    vi.mocked(readFile).mockImplementationOnce(() => gate.promise);
+    radio(en.filesView.viewFile).click();
+    await settle(3);
+    explorer.setActive(REPO, tabB.id); // the user moves on while the read is pending
+    await settle();
+    expect(editorDoc()).toContain("const b = 2;");
+    gate.resolve("const a = 42;\n");
+    await settle();
+    expect(editorDoc()).toContain("const b = 2;"); // B stays on screen
+    explorer.setActive(REPO, tabA.id);
+    await settle();
+    expect(editorDoc()).toContain("const a = 42;");
+    expect(editorDoc()).not.toContain("const a = 1;");
+  });
+
+  it("falls back to the editor when its file becomes unchanged, and stays there when it changes again", async () => {
+    const { state } = mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    expect(diffPath()).toBe("a.ts");
+    state.changedFiles = []; // committed or discarded elsewhere
+    await settle();
+    expect(diffPath()).toBeNull();
+    expect(editorShown()).toBe(true);
+    expect(container.querySelector("[role=radio]")).toBeNull();
+    state.changedFiles = [MOD_A];
+    await settle();
+    expect(radio(en.filesView.viewFile).getAttribute("aria-checked")).toBe("true");
+    expect(diffPath()).toBeNull();
+  });
+
+  it("says Deleted from disk and keeps the buffer", async () => {
+    const { state } = mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    state.changedFiles = [{ path: "a.ts", status: "deleted", section: "unstaged" }];
+    await settle();
+    expect(container.querySelector(".fe__notice")?.textContent).toContain(en.filesView.preview.gone);
+    expect(diffPath()).toBeNull();
+    expect(container.querySelector("[role=radio]")).toBeNull();
+    expect(editorShown()).toBe(true);
+    expect(editorDoc()).toContain("const a = 1;");
   });
 });
