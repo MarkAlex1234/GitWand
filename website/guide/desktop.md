@@ -94,6 +94,19 @@ The file list on the right of the commit diff has a **flat ↔ tree** toggle. Tr
 
 The backing `folder_diff` backend command (Rust/Tauri + Node dev-server + TypeScript wrapper) builds the aggregated tree.
 
+## Files View (v3.11.2)
+
+The **Browse** entry in the dock opens the working tree the way the Finder shows a folder. The tree is on the left and a read-only preview is on the right. You can also open it from the command palette (**View: Browse files**) or, on macOS, from **View → Browse Files**.
+
+- **Status at a glance.** Changed files carry a letter (M, A, D, R, U, C), and every folder above a change carries a count, even a folder you have not opened. Deleted files stay in place, struck through.
+- **Ignored files on demand.** They are hidden by default. **Show ignored** shows them greyed out, and they are still loaded one folder at a time.
+- **Keyboard.** Use ↑ ↓ to move. → expands a folder and then steps into it, and ← collapses it and then climbs to the parent. Enter opens a file or toggles a folder, Home and End jump to the ends, and you can type the start of a name to jump to it. ⇧F10 opens the context menu.
+- **Preview.** Unchanged files open read-only. Changed files show the inline diff, with a **Working tree | Index** switch when a file is both staged and modified. A conflicted file offers **Open in merge editor**. Binary files and files over 5 MB show a placeholder with **Open in editor**.
+- **Context menu.** On a folder: **Scope here**, which narrows the app to that folder and re-roots the tree, with a breadcrumb and **Whole repo** to go back, **Copy path** and **Reveal in Finder**. On a file: **Open in editor**, **Copy path** and **Reveal**.
+- **Live.** The tree and the preview follow changes on disk through the Live Repo watcher.
+
+The view is for exploring. Editing stays in the **Files** panel and staging stays in **Changes**.
+
 ## File History & Blame
 
 - Full file history with `git log --follow`
