@@ -145,10 +145,12 @@ describe("resolveFileTreeShortcut — guards", () => {
   });
 
   it("stays inert while the user types in an editable element", () => {
+    const div = document.createElement("div");
+    div.setAttribute("contenteditable", "true");
     for (const el of [
       document.createElement("input"),
       document.createElement("textarea"),
-      Object.assign(document.createElement("div"), { contentEditable: "true" }),
+      div,
     ]) {
       document.body.appendChild(el);
       let got: unknown = "unset";
