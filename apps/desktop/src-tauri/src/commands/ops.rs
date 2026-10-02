@@ -4751,6 +4751,23 @@ fn reveal_target(cwd: &str, path: &str) -> Result<std::path::PathBuf, String> {
     Ok(full)
 }
 
+/// The forge tokens `hidden_cmd` hands to every child (for `gh`/`glab`). A
+/// file manager has no use for them, so reveal strips them (AGENTS.md: pass
+/// only the env a child process needs).
+const FORGE_TOKEN_VARS: [&str; 4] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITLAB_TOKEN",
+    "GITLAB_ACCESS_TOKEN",
+];
+
+fn strip_forge_tokens(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    for var in FORGE_TOKEN_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 /// Show a working-tree path in the OS file manager. macOS and Windows select
 /// the item; Linux has no portable "select", so it opens the parent folder
 /// through the same opener chain as `open_url` (AppImage-safe env, exit
@@ -4761,7 +4778,7 @@ pub(crate) async fn reveal_in_file_manager(cwd: String, path: String) -> Result<
 
     #[cfg(target_os = "macos")]
     {
-        hidden_cmd("open")
+        strip_forge_tokens(&mut hidden_cmd("open"))
             .arg("-R")
             .arg(&target)
             .spawn()
@@ -4785,7 +4802,7 @@ pub(crate) async fn reveal_in_file_manager(cwd: String, path: String) -> Result<
         // Explorer parses its own command line: `/select,` must be followed by
         // the quoted path inside the same argument, which `arg()` would wrap
         // in quotes as a whole. A Windows path cannot contain `"`.
-        hidden_cmd("explorer")
+        strip_forge_tokens(&mut hidden_cmd("explorer"))
             .raw_arg(format!("/select,\"{}\"", plain))
             .spawn()
             .map_err(|e| format!("Failed to reveal {}: {}", path, e))?;
@@ -4800,7 +4817,7 @@ pub(crate) async fn reveal_in_file_manager(cwd: String, path: String) -> Result<
         let mut errors: Vec<String> = Vec::new();
         for (bin, prefix) in openers {
             let mut cmd = hidden_cmd(bin);
-            cmd.args(prefix).arg(&dir);
+            strip_forge_tokens(&mut cmd).args(prefix).arg(&dir);
             sanitize_appimage_search_paths(&mut cmd);
             match try_open_linux(cmd, bin) {
                 Ok(()) => return Ok(()),
@@ -6081,7 +6098,33 @@ mod operation_action_tests {
 
 #[cfg(test)]
 mod reveal_tests {
-    use super::reveal_target;
+    use super::{reveal_target, strip_forge_tokens, FORGE_TOKEN_VARS};
+
+    #[test]
+    fn strip_forge_tokens_removes_every_forge_token_from_the_child_env() {
+        let mut cmd = std::process::Command::new("true");
+        for var in FORGE_TOKEN_VARS {
+            cmd.env(var, "secret");
+        }
+        strip_forge_tokens(&mut cmd);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        for var in FORGE_TOKEN_VARS {
+            assert!(
+                envs.contains(&(std::ffi::OsStr::new(var), None)),
+                "{} still reaches the child",
+                var
+            );
+        }
+        assert_eq!(
+            FORGE_TOKEN_VARS,
+            [
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GITLAB_TOKEN",
+                "GITLAB_ACCESS_TOKEN"
+            ]
+        );
+    }
 
     fn temp_repo(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
