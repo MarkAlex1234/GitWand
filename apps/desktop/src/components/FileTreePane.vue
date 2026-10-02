@@ -1,13 +1,15 @@
 <script setup lang="ts">
 /**
- * FileTreePane — the Files view's tree (v3.11.2).
+ * FileTreePane — the File Explorer panel's tree (v3.11.2).
  *
  * Virtualized rows (`useVirtualRows`), one tab stop with
  * `aria-activedescendant`, the keyboard model of `fileTreeKeymap.ts`, and a
  * component-local context menu (the `ctxMenu` pattern of CommitGraph.vue).
- * It owns no data: rows come from `useLazyRepoTree` through FilesView, and
- * every action is emitted. The cursor is local because a placeholder row
- * (error, truncated) can hold it without being a selection.
+ * It owns no data: rows come from `useLazyRepoTree` through the panel, and
+ * every action is emitted. `select` means the cursor moved; `activate` means
+ * open the file: a click or Enter opens the preview tab, a double click pins
+ * it. The cursor is local because a placeholder row (error, truncated) can
+ * hold it without being a selection.
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "../composables/useI18n";
@@ -26,6 +28,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   select: [path: string, kind: "file" | "folder"];
+  /** Open the file: a click or Enter (preview tab), a double click (`pinned`). */
+  activate: [path: string, pinned: boolean];
   toggle: [path: string];
   expand: [path: string];
   collapse: [path: string];
@@ -114,7 +118,7 @@ function apply(a: FileTreeAction): void {
       if (r) emit("toggle", r.path);
       break;
     case "open":
-      if (r?.kind === "file") emit("select", r.path, "file");
+      if (r?.kind === "file" && !r.deleted) emit("activate", r.path, false);
       break;
     case "retry":
       if (r) emit("retry", r.path);
@@ -146,6 +150,8 @@ function onRowClick(i: number): void {
     return;
   }
   moveTo(i);
+  if (r?.kind === "folder") emit("toggle", r.path);
+  else if (r?.kind === "file" && !r.deleted) emit("activate", r.path, false);
 }
 
 function onChevronClick(e: MouseEvent, i: number): void {
@@ -155,10 +161,13 @@ function onChevronClick(e: MouseEvent, i: number): void {
   if (r?.kind === "folder") emit("toggle", r.path);
 }
 
+/**
+ * A double click pins the file's tab. A folder needs nothing here: the two
+ * clicks that come before a dblclick have already toggled it twice.
+ */
 function onRowDblClick(i: number): void {
   const r = props.rows[i];
-  if (r?.kind === "folder") emit("toggle", r.path);
-  else if (r?.kind === "file" && !r.deleted) emit("open-in-editor", r.path);
+  if (r?.kind === "file" && !r.deleted) emit("activate", r.path, true);
 }
 
 // ── Status presentation ────────────────────────────────────

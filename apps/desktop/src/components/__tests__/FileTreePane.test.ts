@@ -56,7 +56,7 @@ afterEach(() => {
   container?.remove();
 });
 
-async function mount(props: { selectedPath?: string | null; showIgnored?: boolean } = {}) {
+async function mount(props: { selectedPath?: string | null; showIgnored?: boolean; rows?: LazyTreeRow[] } = {}) {
   const events: Array<[string, ...unknown[]]> = [];
   const on = (name: string) => (...args: unknown[]) => {
     events.push([name, ...args]);
@@ -67,11 +67,12 @@ async function mount(props: { selectedPath?: string | null; showIgnored?: boolea
     defineComponent({
       setup: () => () =>
         h(FileTreePane, {
-          rows: ROWS,
+          rows: props.rows ?? ROWS,
           selectedPath: props.selectedPath ?? null,
           showIgnored: props.showIgnored ?? false,
           label: "repo",
           onSelect: on("select"),
+          onActivate: on("activate"),
           onToggle: on("toggle"),
           onExpand: on("expand"),
           onCollapse: on("collapse"),
@@ -260,5 +261,54 @@ describe("FileTreePane — Show ignored", () => {
     box.checked = true;
     box.dispatchEvent(new Event("change"));
     expect(last(events)).toEqual(["update:showIgnored", true]);
+  });
+});
+
+describe("FileTreePane — activation (File Explorer panel)", () => {
+  const DELETED: LazyTreeRow = {
+    kind: "file", path: "gone.ts", name: "gone.ts", depth: 0,
+    ignored: false, symlink: false, deleted: true, size: 0, status: null,
+  };
+
+  it("a click on a file moves the cursor and opens it as a preview", async () => {
+    const events = await mount();
+    items()[3]!.click();
+    expect(events).toEqual([["select", "src/a.ts", "file"], ["activate", "src/a.ts", false]]);
+  });
+
+  it("a double click pins the file and never hands it to the external editor", async () => {
+    const events = await mount();
+    items()[3]!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    expect(last(events)).toEqual(["activate", "src/a.ts", true]);
+    expect(events.some(([name]) => name === "open-in-editor")).toBe(false);
+  });
+
+  it("Enter opens the file under the cursor as a preview", async () => {
+    const events = await mount({ selectedPath: "src/a.ts" });
+    key("Enter");
+    expect(last(events)).toEqual(["activate", "src/a.ts", false]);
+  });
+
+  it("the arrow keys only move the cursor", async () => {
+    const events = await mount();
+    key("ArrowDown");
+    key("ArrowDown");
+    key("ArrowDown");
+    key("ArrowDown");
+    expect(events.some(([name]) => name === "activate")).toBe(false);
+  });
+
+  it("a click on a folder row toggles it", async () => {
+    const events = await mount();
+    items()[4]!.click();
+    expect(events).toEqual([["select", "docs", "folder"], ["toggle", "docs"]]);
+  });
+
+  it("never activates a deleted file", async () => {
+    const events = await mount({ rows: [DELETED], selectedPath: "gone.ts" });
+    items()[0]!.click();
+    items()[0]!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    key("Enter");
+    expect(events.some(([name]) => name === "activate")).toBe(false);
   });
 });
