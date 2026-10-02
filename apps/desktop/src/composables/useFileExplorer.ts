@@ -136,6 +136,32 @@ export function useFileExplorer() {
     tab.originalContent = tab.content;
   }
 
+  /**
+   * v3.11.2 — re-read a clean tab from disk. The panel calls it when a tab
+   * leaves its Diff side: the diff showed the file on disk, and the buffer
+   * dates from when the tab opened, so the editor must not come back older
+   * than the diff the user just read (and then overwrite it on save). A dirty
+   * tab is never touched, a read that lands after the user typed (or after the
+   * tab/repo went away) is dropped, and a failed read keeps the buffer.
+   * Returns true when the buffer changed.
+   */
+  async function reloadTab(repoPath: string, cwd: string, tabId: number): Promise<boolean> {
+    const tab = tabsFor(repoPath).find((t) => t.id === tabId);
+    if (!tab || tab.loading || tab.binary || isDirty(tab)) return false;
+    const before = tab.originalContent;
+    let content: string;
+    try {
+      content = await readFile(cwd, tab.path);
+    } catch {
+      return false;
+    }
+    if (tabsFor(repoPath).find((t) => t.id === tabId) !== tab) return false;
+    if (isDirty(tab) || tab.originalContent !== before || content === before) return false;
+    tab.content = content;
+    tab.originalContent = content;
+    return true;
+  }
+
   function closeTab(repoPath: string, tabId: number) {
     const tabs = tabsFor(repoPath);
     const idx = tabs.findIndex((t) => t.id === tabId);
@@ -164,6 +190,7 @@ export function useFileExplorer() {
     isDirty,
     openTab,
     saveTab,
+    reloadTab,
     closeTab,
     updateContent,
     disposeRepo,
