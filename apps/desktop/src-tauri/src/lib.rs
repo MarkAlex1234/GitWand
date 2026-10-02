@@ -257,6 +257,18 @@ pub fn read_file_parity(cwd: String, path: String) -> Result<String, String> {
     tauri::async_runtime::block_on(commands::files::read_file(cwd, path))
 }
 
+/// Parity entry point for `list_repo_dir` (v3.11.2). Rust classifies ignored
+/// entries in process with libgit2; the dev-server shells out to
+/// `git check-ignore`. Two mechanisms answering one question is exactly what
+/// parity coverage exists for.
+pub fn list_repo_dir_parity(
+    cwd: String,
+    dir: String,
+    include_ignored: bool,
+) -> Result<types::RepoDirListing, String> {
+    tauri::async_runtime::block_on(commands::files::list_repo_dir(cwd, dir, include_ignored))
+}
+
 /// Parity entry points for the three Conflict Predictor commands. Until
 /// v3.11.0 the dev-server had no route for any of them: `previewMerge` POSTed
 /// to a path that did not exist and swallowed the failure into `[]`, and the

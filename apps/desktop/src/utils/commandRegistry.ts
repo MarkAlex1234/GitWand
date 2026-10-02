@@ -143,6 +143,7 @@ export const COMMAND_REGISTRY: Record<string, CommandRegistryEntry> = {
   gl_list_issues: { route: "/api/gl-list-issues" },
   list_dir: { route: "/api/list-dir" },
   list_repo_tree: { route: "/api/list-repo-tree" },
+  list_repo_dir: { route: "/api/list-repo-dir" },
   path_exists: { route: "/api/path-exists" },
   preview_cherry_pick: { route: "/api/preview-cherry-pick" },
   preview_merge: { route: "/api/preview-merge" },

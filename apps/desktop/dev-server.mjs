@@ -10,7 +10,7 @@
 
 import { createServer } from "node:http";
 import { execSync, execFileSync, spawnSync, spawn } from "node:child_process";
-import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, unlinkSync, realpathSync, renameSync, mkdirSync, mkdtempSync, rmSync, copyFileSync, watch } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync, unlinkSync, realpathSync, renameSync, mkdirSync, mkdtempSync, rmSync, copyFileSync, watch } from "node:fs";
 import { resolve, join, dirname, basename, sep, isAbsolute } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { Socket } from "node:net";
@@ -106,6 +106,97 @@ function devExtractPercent(line) {
   const m = before.match(/(\d+(?:\.\d+)?)\s*$/);
   if (!m) return 0;
   return Math.min(100, Math.max(0, parseFloat(m[1])));
+}
+
+/** Per-directory cap of `list_repo_dir` — mirrors MAX_REPO_DIR_ENTRIES in files.rs. */
+const MAX_REPO_DIR_ENTRIES = 5000;
+
+/** Code-point order, the same as Rust's `str::cmp` (UTF-8 byte order). */
+function cmpCodePoints(a, b) {
+  return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+}
+
+/**
+ * Mirror of the Tauri `list_repo_dir` command (Files view, v3.11.2): one level
+ * of the working tree, `.git` skipped, symlinks reported and never followed,
+ * non-UTF-8 names skipped, sorted directories first then case-insensitively,
+ * capped after sorting. Rust classifies ignores in process with libgit2; this
+ * process has no libgit2, so it makes one `git check-ignore -z --stdin` call,
+ * which already leaves tracked paths out (verified 2026-10-01: `build/`
+ * holding a tracked file and a force-added `*.log` are not reported). Slow on
+ * a huge directory, but dev-only. Pinned by tests/parity/list-repo-dir.test.mjs.
+ */
+function devListRepoDir(cwd, rawDir, includeIgnored) {
+  if (!cwd || !cwd.trim()) throw new Error("cwd must not be empty");
+  const dir = String(rawDir ?? "").replace(/^\/+|\/+$/g, "");
+  if (dir.split("/").includes(".git")) throw new Error(`Refusing to list inside .git: ${dir}`);
+  const resolved = safeRepoPath(cwd, dir === "" ? "." : dir);
+  let st;
+  try {
+    st = statSync(resolved);
+  } catch {
+    throw new Error(`Directory not found: ${dir}`);
+  }
+  if (!st.isDirectory()) throw new Error(`Not a directory: ${dir}`);
+
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const raw = [];
+  let dirents;
+  try {
+    dirents = readdirSync(resolved, { withFileTypes: true, encoding: "buffer" });
+  } catch (e) {
+    throw new Error(`Failed to list ${dir || "."}: ${e.message}`);
+  }
+  for (const d of dirents) {
+    let name;
+    try {
+      name = decoder.decode(d.name);
+    } catch {
+      continue; // not UTF-8: no path built from it could round-trip
+    }
+    if (name === ".git") continue;
+    const kind = d.isSymbolicLink() ? "symlink" : d.isDirectory() ? "dir" : "file";
+    let size = 0;
+    if (kind === "file") {
+      try { size = lstatSync(join(resolved, name)).size; } catch { size = 0; }
+    }
+    raw.push({ name, kind, size });
+  }
+  raw.sort((a, b) => {
+    if ((a.kind === "dir") !== (b.kind === "dir")) return a.kind === "dir" ? -1 : 1;
+    return cmpCodePoints(a.name.toLowerCase(), b.name.toLowerCase()) || cmpCodePoints(a.name, b.name);
+  });
+
+  const prefix = dir ? `${dir}/` : "";
+  const rels = raw.map((e) => prefix + e.name);
+  let ignoredSet = new Set();
+  if (rels.length > 0) {
+    const r = spawnSync(GIT, ["check-ignore", "-z", "--stdin"], {
+      cwd,
+      input: rels.join("\0") + "\0",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    // 0 = some ignored, 1 = none ignored; anything else is a git failure,
+    // reported but not fatal (the listing is still right about what exists).
+    if (r.status === 0) {
+      ignoredSet = new Set(r.stdout.toString("utf8").split("\0").filter(Boolean));
+    } else if (r.status !== 1) {
+      console.warn(`[dev] list-repo-dir: git check-ignore failed: ${r.stderr?.toString() ?? r.error}`);
+    }
+  }
+
+  const entries = [];
+  let truncated = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ignored = ignoredSet.has(rels[i]);
+    if (ignored && !includeIgnored) continue;
+    if (entries.length === MAX_REPO_DIR_ENTRIES) {
+      truncated = true;
+      break;
+    }
+    entries.push({ name: raw[i].name, path: rels[i], kind: raw[i].kind, ignored, size: raw[i].size });
+  }
+  return { entries, truncated };
 }
 
 /**
@@ -2050,6 +2141,20 @@ async function handleRequest(req, res) {
       sortNode(root);
 
       return jsonResponse(req, res, { root, truncated });
+    }
+
+    // POST /api/list-repo-dir  { cwd, dir, includeIgnored }
+    //
+    // Mirrors the Tauri `list_repo_dir` command (Files view, v3.11.2) through
+    // devListRepoDir() above. Response: { entries, truncated }, camelCase like
+    // the Rust struct's `rename_all = "camelCase"`.
+    if (url.pathname === "/api/list-repo-dir" && req.method === "POST") {
+      const { cwd, dir = "", includeIgnored = false } = await readBody(req);
+      try {
+        return jsonResponse(req, res, devListRepoDir(cwd, dir, includeIgnored === true));
+      } catch (e) {
+        return jsonResponse(req, res, { error: e.message }, 400);
+      }
     }
 
     // GET /api/list-dir?path=/some/dir  — list directories for folder picker

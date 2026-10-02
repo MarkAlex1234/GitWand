@@ -410,6 +410,51 @@ export async function listRepoTree(cwd: string): Promise<RepoTreeResult> {
   return res.json();
 }
 
+// ─── One working-tree directory (Files view, v3.11.2) ────────────────
+
+/** One entry of `listRepoDir`. `path` is repo-relative with `/` separators. */
+export interface RepoDirEntry {
+  name: string;
+  path: string;
+  /** Symlinks are reported, never followed. */
+  kind: "file" | "dir" | "symlink";
+  /** Matched by an ignore rule and not tracked. Only returned when requested. */
+  ignored: boolean;
+  /** Byte length for files; 0 for directories and symlinks. */
+  size: number;
+}
+
+export interface RepoDirListing {
+  entries: RepoDirEntry[];
+  /** More than 5,000 listable entries: only the first 5,000 are returned. */
+  truncated: boolean;
+}
+
+/**
+ * List one directory of the working tree (`dir` is repo-relative, "" for the
+ * root). `.git` is never listed. Ignored entries are dropped unless
+ * `includeIgnored`, in which case they come back with `ignored: true`.
+ */
+export async function listRepoDir(
+  cwd: string,
+  dir: string,
+  includeIgnored: boolean,
+): Promise<RepoDirListing> {
+  if (isTauri()) {
+    return tauriInvoke<RepoDirListing>("list_repo_dir", { cwd, dir, includeIgnored });
+  }
+  const res = await devFetch(`${DEV_SERVER}/api/list-repo-dir`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd, dir, includeIgnored }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `list_repo_dir failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ─── Git status ────────────────────────────────────────────
 
 export interface FileChange {
