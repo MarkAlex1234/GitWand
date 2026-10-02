@@ -179,7 +179,7 @@ export function useFilePreview(opts: UseFilePreviewOptions) {
 
   // Declared before the load watcher so a new selection loads once, on the working tree.
   watch(
-    () => opts.target.value?.path ?? null,
+    [() => opts.cwd.value, () => opts.target.value?.path ?? null],
     () => {
       side.value = "worktree";
     },

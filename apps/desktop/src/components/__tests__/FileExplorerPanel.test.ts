@@ -710,6 +710,48 @@ describe("FileExplorerPanel — Diff | File (v3.11.2)", () => {
     expect(diffPath()).toBe("a.ts");
   });
 
+  it("keeps a tab's chosen side across a repo switch and back", async () => {
+    const { state } = mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    radio(en.filesView.viewFile).click();
+    await settle();
+    state.repoPath = OTHER;
+    await settle();
+    state.repoPath = REPO;
+    await settle();
+    expect(radio(en.filesView.viewFile).getAttribute("aria-checked")).toBe("true");
+    expect(diffPath()).toBeNull();
+  });
+
+  it("a tab opened before its repo's status arrives still lands on its diff", async () => {
+    const { state } = mountPanel([]);
+    await settle();
+    await useFileExplorer().openTab(OTHER, OTHER, "a.ts", false);
+    state.repoPath = OTHER; // changedFiles still holds the previous repo's (empty) status
+    await settle();
+    state.changedFiles = [MOD_A];
+    await settle();
+    expect(diffPath()).toBe("a.ts");
+    expect(radio(en.filesView.viewDiff).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("locks Lock/Edit while the diff shows", async () => {
+    mountPanel([MOD_A]);
+    await settle();
+    row("a.ts").click();
+    await settle();
+    const lock = () =>
+      [...container.querySelectorAll<HTMLButtonElement>(".fe__header-actions .fe__action-btn")].find(
+        (b) => b.textContent?.includes(en.files.toolbarLock) || b.textContent?.includes(en.files.toolbarEdit),
+      )!;
+    expect(lock().disabled).toBe(true);
+    radio(en.filesView.viewFile).click();
+    await settle();
+    expect(lock().disabled).toBe(false);
+  });
+
   it("has the toggle's strings in all five locales", () => {
     for (const loc of [en, fr, es, ptBR, zhCN]) {
       expect(loc.filesView.viewLabel).toBeTruthy();

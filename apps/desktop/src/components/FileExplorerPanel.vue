@@ -396,7 +396,21 @@ function onToolbarSave() {
 // panel shows the tab, so a file that becomes changed while open does not
 // flip its tab. The diff reads the disk, which is why a dirty buffer cannot
 // switch to it (canShowDiff).
-const tabViews = reactive(new Map<number, TabView>());
+// Keyed by repo + tab id: the panel stays mounted across a repo switch, and a
+// tab's side must survive leaving and coming back to its repo.
+const viewKey = (id: number) => `${props.repoPath}::${id}`;
+const tabViews = reactive(new Map<string, TabView>());
+// Right after a repo switch `changedFiles` still holds the previous repo's
+// status until the new one loads: deciding a tab's first side then would
+// record "file" for a file changed only in the new repo. Until the status
+// arrives, no side is recorded and the tab resolves from the live status.
+const statusPending = ref(false);
+watch(repoPathRef, () => {
+  statusPending.value = true;
+});
+watch(changedFilesRef, () => {
+  statusPending.value = false;
+});
 const activeStatus = computed(() =>
   activeTab.value ? (tree.statusByPath.value.get(activeTab.value.path) ?? null) : null,
 );
@@ -404,7 +418,7 @@ const activeDiffable = computed(() => isDiffable(activeStatus.value));
 const showDiff = computed(
   () =>
     activeTab.value !== null &&
-    visibleTabView(tabViews.get(activeTab.value.id), activeStatus.value, explorer.isDirty(activeTab.value)) === "diff",
+    visibleTabView(tabViews.get(viewKey(activeTab.value.id)), activeStatus.value, explorer.isDirty(activeTab.value)) === "diff",
 );
 const diffBlocked = computed(
   () => activeTab.value !== null && !canShowDiff(activeStatus.value, explorer.isDirty(activeTab.value)),
@@ -436,9 +450,11 @@ const canSwitchSide = computed(() => preview.plan.value?.kind === "diff" && prev
 const diffMode = ref<DiffMode>("inline");
 
 watch(
-  () => activeTab.value?.id ?? null,
-  (id) => {
-    if (id !== null && !tabViews.has(id)) tabViews.set(id, initialTabView(activeStatus.value));
+  () => [activeTab.value?.id ?? null, props.repoPath, statusPending.value] as const,
+  ([id, , pending]) => {
+    if (id === null || pending) return;
+    const k = viewKey(id);
+    if (!tabViews.has(k)) tabViews.set(k, initialTabView(activeStatus.value));
   },
   { immediate: true },
 );
@@ -447,7 +463,7 @@ function setView(view: TabView): void {
   const tab = activeTab.value;
   if (!tab) return;
   if (view === "diff" && !canShowDiff(activeStatus.value, explorer.isDirty(tab))) return;
-  tabViews.set(tab.id, view);
+  tabViews.set(viewKey(tab.id), view);
   if (view === "file") void mountTab(tab);
 }
 
@@ -468,9 +484,18 @@ watch(
       if (!ids.includes(id)) {
         docStates.delete(id);
         blameModels.delete(id);
-        tabViews.delete(id);
       }
     }
+  },
+);
+
+// A side is dropped only when its tab is closed in its own repo: ids are
+// compared within one repoPath, never across a repo switch.
+watch(
+  () => [props.repoPath, tabs.value.map((t) => t.id)] as const,
+  ([repo, ids], [oldRepo, oldIds]) => {
+    if (repo !== oldRepo) return;
+    for (const id of oldIds) if (!ids.includes(id)) tabViews.delete(`${repo}::${id}`);
   },
 );
 
@@ -511,6 +536,7 @@ function onKeyDown(e: KeyboardEvent) {
         <button
           class="fe__action-btn"
           :class="{ 'fe__action-btn--active': !editLocked }"
+          :disabled="showDiff"
           :title="editLocked ? t('files.toolbarEdit') : t('files.toolbarLock')"
           @click="toggleLock"
         >

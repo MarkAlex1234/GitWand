@@ -58,10 +58,15 @@ function loaders(over: Partial<PreviewLoaders> = {}): PreviewLoaders {
     ...over,
   };
 }
-function run(target: Ref<PreviewTarget | null>, l: PreviewLoaders, watcher: TreeWatcher | null = null) {
+function run(
+  target: Ref<PreviewTarget | null>,
+  l: PreviewLoaders,
+  watcher: TreeWatcher | null = null,
+  cwd: Ref<string> = ref("/repo"),
+) {
   const scope = effectScope();
   scopes.push(scope);
-  return scope.run(() => useFilePreview({ cwd: ref("/repo"), target, loaders: l, watcher }))!;
+  return scope.run(() => useFilePreview({ cwd, target, loaders: l, watcher }))!;
 }
 
 describe("planPreview", () => {
@@ -150,6 +155,18 @@ describe("useFilePreview — bodies", () => {
     await flush();
     expect(p.side.value).toBe("worktree");
     expect(l.getDiff).toHaveBeenLastCalledWith("/repo", "b.ts", false);
+  });
+
+  it("resets the side to the working tree when the repo changes, even for the same path", async () => {
+    const cwd = ref("/repo");
+    const l = loaders();
+    const p = run(ref(fileTarget("a.ts", st({ staged: true, unstaged: true }))), l, null, cwd);
+    p.side.value = "index";
+    await flush();
+    cwd.value = "/other";
+    await flush();
+    expect(p.side.value).toBe("worktree");
+    expect(l.getDiff).toHaveBeenLastCalledWith("/other", "a.ts", false);
   });
 
   it("turns a truncated or empty diff into a placeholder", async () => {
