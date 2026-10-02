@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **The Linux AppImage would not start for a user other than the one who mounted it.** The Tauri bundler stored the launcher, `AppRun.wrapped`, as `0770` (tauri-apps/tauri#16155). A normal start never noticed, but `firejail --appimage`, which mounts the image as root, got `Permission denied`, and so did the AppImage catalog's test (AppImage/appimage.github.io#7392). `@tauri-apps/cli` is now on 2.12, which ships the launcher as `0755`, and the CI bundle build fails if any file in the AppImage is executable or readable by its owner only.
+- **Three diff panels never appeared in the packaged app.** On the desktop path, `getGitDiff` rebuilt the diff from its path and hunks only, and dropped every other field the Rust command sends. So the "diff truncated at 5 MB" banner, the untracked-directory panel and the nested-repository panel (issue #183) never rendered, while they did under `pnpm dev:web`. The wrapper now passes those fields through.
 
 ## [3.11.1] - 2026-09-25
 

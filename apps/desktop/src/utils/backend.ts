@@ -603,6 +603,12 @@ export async function getGitDiff(
   if (isTauri()) {
     const raw = await tauriInvoke<{
       path: string;
+      status?: GitDiff["status"];
+      oldPath?: string;
+      truncatedFromBytes?: number;
+      isDirectory?: boolean;
+      newFiles?: string[];
+      nestedRepo?: boolean;
       hunks: Array<{
         header: string;
         old_start: number;
@@ -620,6 +626,15 @@ export async function getGitDiff(
 
     return {
       path: raw.path,
+      // Already camelCase on the wire (explicit serde renames in types.rs).
+      // Dropping them hid the 5 MB truncation banner and the untracked-
+      // directory / nested-repo panel (issue #183) in the packaged app only.
+      status: raw.status,
+      oldPath: raw.oldPath,
+      truncatedFromBytes: raw.truncatedFromBytes,
+      isDirectory: raw.isDirectory,
+      newFiles: raw.newFiles,
+      nestedRepo: raw.nestedRepo,
       hunks: raw.hunks.map((h) => ({
         header: h.header,
         oldStart: h.old_start,

@@ -97,3 +97,53 @@ describe("revealInFileManager", () => {
     );
   });
 });
+
+describe("getGitDiff — Tauri path", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    devFetch.mockReset();
+    tauriInvoke.mockReset();
+    tauri = true;
+  });
+
+  it("keeps the truncation marker the Rust command sends", async () => {
+    tauriInvoke.mockResolvedValue({ path: "big.sql", hunks: [], truncatedFromBytes: 7_340_032 });
+    const { getGitDiff } = await import("../backend");
+    const diff = await getGitDiff("/repo", "big.sql", false);
+    expect(diff.truncatedFromBytes).toBe(7_340_032);
+  });
+
+  it("keeps the directory, nested-repo, status and rename fields", async () => {
+    tauriInvoke.mockResolvedValue({
+      path: "vendor/",
+      hunks: [],
+      status: "renamed",
+      oldPath: "old/",
+      isDirectory: true,
+      newFiles: ["vendor/a.txt"],
+      nestedRepo: true,
+    });
+    const { getGitDiff } = await import("../backend");
+    const diff = await getGitDiff("/repo", "vendor/", false);
+    expect(diff).toMatchObject({
+      status: "renamed",
+      oldPath: "old/",
+      isDirectory: true,
+      newFiles: ["vendor/a.txt"],
+      nestedRepo: true,
+    });
+  });
+
+  it("still maps hunks from snake_case", async () => {
+    tauriInvoke.mockResolvedValue({
+      path: "a.ts",
+      hunks: [{ header: "@@", old_start: 1, old_count: 1, new_start: 1, new_count: 1, lines: [{ type: "add", content: "x", new_line_no: 1 }] }],
+    });
+    const { getGitDiff } = await import("../backend");
+    const diff = await getGitDiff("/repo", "a.ts", false);
+    expect(diff.hunks[0]).toEqual({
+      header: "@@", oldStart: 1, oldCount: 1, newStart: 1, newCount: 1,
+      lines: [{ type: "add", content: "x", oldLineNo: undefined, newLineNo: 1 }],
+    });
+  });
+});
