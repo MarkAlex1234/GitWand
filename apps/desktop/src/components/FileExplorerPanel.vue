@@ -427,9 +427,10 @@ const previewTarget = computed<PreviewTarget | null>(() => {
   const tab = activeTab.value;
   const status = activeStatus.value;
   if (!tab || !status || !showDiff.value) return null;
-  // `size` lets planPreview refuse a huge untracked file before diffing it
-  // (the Rust diff only truncates at 5 MB). The tree row carries it; a file
-  // whose folder is not loaded has no row, and keeps 0.
+  // `size` lets planPreview refuse a huge untracked file before diffing it at
+  // all. The tree row carries it; a file whose folder is not loaded has no
+  // row, and keeps 0 — then git_diff's own 5 MB cap (plain and untracked
+  // --no-index output alike) still bounds what crosses IPC.
   const row = tree.rows.value.find((r) => r.kind === "file" && r.path === tab.path);
   const size = row?.kind === "file" ? row.size : 0;
   return { kind: "file", path: tab.path, size, symlink: false, status };

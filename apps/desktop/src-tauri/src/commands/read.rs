@@ -744,6 +744,22 @@ fn compute_main_commit_count(cwd: &str, branch: &str) -> i32 {
 
 // ─── Git diff ────────────────────────────────────────────────
 
+/// Defensive truncation of raw `git diff` output at `DIFF_TRUNCATE_BYTES`.
+/// Slices at the last newline within the cap so the parser never sees a hunk
+/// header (or line) split mid-way. Returns the kept bytes and, when cut, the
+/// original size for `GitDiff::truncated_from_bytes`.
+fn truncate_diff_output(raw: &[u8]) -> (&[u8], Option<u64>) {
+    if raw.len() <= DIFF_TRUNCATE_BYTES {
+        return (raw, None);
+    }
+    let mut cut = DIFF_TRUNCATE_BYTES;
+    // Walk back to the last \n so the parser sees complete lines.
+    while cut > 0 && raw[cut - 1] != b'\n' {
+        cut -= 1;
+    }
+    (&raw[..cut], Some(raw.len() as u64))
+}
+
 #[tauri::command]
 pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<GitDiff, String> {
     let _repo = repo_lock::read(&cwd);
@@ -778,24 +794,7 @@ pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<
         }
     };
 
-    // Defensive truncation. We slice at the last newline within the cap so
-    // we never split a hunk header mid-line.
-    let original_size = raw.len();
-    let truncated_from_bytes: Option<u64> = if original_size > DIFF_TRUNCATE_BYTES {
-        Some(original_size as u64)
-    } else {
-        None
-    };
-    let stdout_slice: &[u8] = if truncated_from_bytes.is_some() {
-        let mut cut = DIFF_TRUNCATE_BYTES;
-        // Walk back to the last \n so the parser sees complete lines.
-        while cut > 0 && raw[cut - 1] != b'\n' {
-            cut -= 1;
-        }
-        &raw[..cut]
-    } else {
-        &raw
-    };
+    let (stdout_slice, mut truncated_from_bytes) = truncate_diff_output(&raw);
     let stdout = String::from_utf8_lossy(stdout_slice);
     let (mut hunks, mut status) = parse_diff_hunks(&stdout);
 
@@ -825,11 +824,15 @@ pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<
             .current_dir(&cwd)
             .output()
         {
-            let fb_stdout = String::from_utf8_lossy(&fb.stdout);
+            // Same cap as the plain diff: a huge new file must not stream
+            // its whole content over IPC.
+            let (fb_slice, fb_truncated) = truncate_diff_output(&fb.stdout);
+            let fb_stdout = String::from_utf8_lossy(fb_slice);
             let (fb_hunks, fb_status) = parse_diff_hunks(&fb_stdout);
             if !fb_hunks.is_empty() {
                 hunks = fb_hunks;
                 status = fb_status.or(Some("added".to_string()));
+                truncated_from_bytes = fb_truncated;
             }
         }
     }
@@ -3332,6 +3335,39 @@ mod pathspec_tests {
         .expect("git_diff failed");
         assert_eq!(d.status.as_deref(), Some("added"));
         assert!(d.hunks[0].lines.iter().all(|l| l.r#type == "add"));
+    }
+
+    /// The untracked `--no-index` fallback is capped like the plain diff: a
+    /// huge new file must not stream its whole content over IPC.
+    #[test]
+    fn git_diff_truncates_an_oversized_untracked_file() {
+        let repo = TempRepo::new();
+        repo.write("root.txt", "root");
+        repo.commit_all("init");
+        let lines = 600_000; // 10 bytes each: 6 MB on disk, ~6.6 MB of diff
+        repo.write("big.txt", &"xxxxxxxxx\n".repeat(lines));
+
+        let d = tauri::async_runtime::block_on(git_diff(
+            repo.cwd().to_string(),
+            "big.txt".to_string(),
+            false,
+        ))
+        .expect("git_diff failed");
+        let from = d
+            .truncated_from_bytes
+            .expect("an untracked diff over the cap must report truncation");
+        assert!(from > DIFF_TRUNCATE_BYTES as u64);
+        assert_eq!(d.status.as_deref(), Some("added"));
+        let shown: usize = d.hunks.iter().map(|h| h.lines.len()).sum();
+        assert!(shown > 0);
+        assert!(shown < lines, "hunks must be capped, got {shown} lines");
+        // Each shown line is "+xxxxxxxxx\n": the kept output fits the cap.
+        assert!(shown * 11 <= DIFF_TRUNCATE_BYTES);
+        assert!(d
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .all(|l| l.r#type == "add"));
     }
 
     /// Regression test: a TRACKED file whose only change is already staged

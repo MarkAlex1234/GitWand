@@ -273,6 +273,11 @@ console.log(`[dev-server] git binary: ${GIT}`);
  * non-zero or the process fails to spawn.
  */
 function gitSpawn(args, cwd) {
+  return gitSpawnBytes(args, cwd).then((buf) => buf.toString("utf-8"));
+}
+
+/** `gitSpawn`, resolving the raw stdout bytes. */
+function gitSpawnBytes(args, cwd) {
   return new Promise((resolve, reject) => {
     const child = spawn(GIT, args, { cwd });
     const stdoutChunks = [];
@@ -288,9 +293,24 @@ function gitSpawn(args, cwd) {
         reject(new Error(`git ${args.join(" ")} exited with ${code}: ${stderr.trim()}`));
         return;
       }
-      resolve(Buffer.concat(stdoutChunks).toString("utf-8"));
+      resolve(Buffer.concat(stdoutChunks));
     });
   });
+}
+
+/** Mirrors `DIFF_TRUNCATE_BYTES` in src-tauri/src/types.rs. */
+const DIFF_TRUNCATE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Mirrors `truncate_diff_output` in src-tauri/src/commands/read.rs: cap raw
+ * diff bytes at DIFF_TRUNCATE_BYTES, cut back to the last newline so the
+ * parser only sees complete lines, and report the original size.
+ */
+function truncateDiffOutput(raw) {
+  if (raw.length <= DIFF_TRUNCATE_BYTES) return { text: raw.toString("utf-8"), truncatedFromBytes: undefined };
+  let cut = DIFF_TRUNCATE_BYTES;
+  while (cut > 0 && raw[cut - 1] !== 0x0a) cut--;
+  return { text: raw.subarray(0, cut).toString("utf-8"), truncatedFromBytes: raw.length };
 }
 
 /**
@@ -2476,10 +2496,11 @@ async function handleRequest(req, res) {
 
         const args = staged ? ["diff", "--cached", "--", path] : ["diff", "--", path];
         let stdout;
+        let truncatedFromBytes;
         try {
           // Stream via spawn — execSync's default 1 MB cap blows up on large files
           // (lockfiles, generated assets, big migrations…).
-          stdout = await gitSpawn(args, resolvedCwd);
+          ({ text: stdout, truncatedFromBytes } = truncateDiffOutput(await gitSpawnBytes(args, resolvedCwd)));
         } catch { stdout = ""; }
 
         // ── New untracked file: fall back to --no-index diff (all lines green) ──
@@ -2497,10 +2518,14 @@ async function handleRequest(req, res) {
               encoding: "utf-8",
             }).status === 0;
           if (!tracked && existsSync(absFile) && !statSync(absFile).isDirectory()) {
-            const r = spawnSync("git", ["diff", "--no-index", "--", "/dev/null", absFile], {
-              cwd: resolvedCwd, encoding: "utf-8",
+            // Raw bytes, no maxBuffer cap: like the Rust side, read it all,
+            // then truncate the same way as the plain diff. The repo-relative
+            // path (as in Rust) keeps the header, hence the byte count and the
+            // cut, identical on both sides.
+            const r = spawnSync("git", ["diff", "--no-index", "--", "/dev/null", path], {
+              cwd: resolvedCwd, maxBuffer: Infinity,
             });
-            stdout = r.stdout || "";
+            ({ text: stdout, truncatedFromBytes } = truncateDiffOutput(r.stdout || Buffer.alloc(0)));
           }
         }
 
@@ -2570,7 +2595,12 @@ async function handleRequest(req, res) {
 
         if (currentHunk) hunks.push(currentHunk);
 
-        return jsonResponse(req, res, { path, hunks, ...(status ? { status } : {}) });
+        return jsonResponse(req, res, {
+          path,
+          hunks,
+          ...(status ? { status } : {}),
+          ...(truncatedFromBytes !== undefined ? { truncatedFromBytes } : {}),
+        });
       } catch (err) {
         return jsonResponse(req, res, { error: err.stderr?.toString() || err.message }, 500);
       }
