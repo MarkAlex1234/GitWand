@@ -19,9 +19,12 @@
  */
 
 import { describe, it, beforeAll, afterAll, expect } from "vitest";
+import { rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { startDevServer } from "./dev-server-runner.mjs";
 import { assertParity } from "./harness.mjs";
-import { fixtureDiff, fixtureUntrackedDirs } from "./fixtures.mjs";
+import { runProbe } from "./probe.mjs";
+import { commitFile, fixtureDiff, fixtureUntrackedDirs, mkTempRepo } from "./fixtures.mjs";
 
 describe("parity: git-diff", () => {
   /** @type {Awaited<ReturnType<typeof startDevServer>>} */
@@ -125,6 +128,52 @@ describe("parity: git-diff", () => {
 
       expect(rust.hunks).toEqual([]);
       expect(node.hunks).toEqual([]);
+    });
+  });
+
+  // The untracked fallback runs `git diff --no-index -- /dev/null <path>`,
+  // which reads any file it is handed. Neither backend validated `path`, so
+  // `../secret` rendered a file outside the repository.
+  describe("path boundary", () => {
+    const SECRET = "outside-secret-content";
+
+    it("a `../` or absolute path outside the repo is refused by both, with the same message", async () => {
+      const cwd = mkTempRepo("gw-parity-diff-escape-");
+      commitFile(cwd, "a.txt", "a\n", "init", 0);
+      const outside = join(cwd, "..", `${basename(cwd)}-outside.txt`);
+      writeFileSync(outside, `${SECRET}\n`);
+      try {
+        for (const path of [`../${basename(outside)}`, outside]) {
+          const rust = runProbe("git-diff", { cwd, path, staged: false });
+          const res = await dev.fetch(
+            `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}&staged=false`,
+          );
+          const node = await res.json();
+
+          expect(rust.ok, `rust must not diff ${path}`).toBe(false);
+          expect(res.status, `node must refuse ${path}`).toBe(400);
+          expect(rust.error).toMatch(/^path escapes cwd/);
+          expect(node.error).toBe(rust.error);
+          expect(JSON.stringify(node)).not.toContain(SECRET);
+        }
+      } finally {
+        rmSync(outside, { force: true });
+      }
+    });
+
+    it("a deleted file whose directory is gone still diffs identically", async () => {
+      const cwd = mkTempRepo("gw-parity-diff-deleted-");
+      commitFile(cwd, "old/deep/gone.txt", "bye\n", "init", 0);
+      rmSync(join(cwd, "old"), { recursive: true });
+      const { rust, node } = await assertParity(dev, {
+        command: "git-diff",
+        args: { cwd, path: "old/deep/gone.txt", staged: false },
+        httpPath: `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent("old/deep/gone.txt")}&staged=false`,
+      });
+      for (const side of [rust, node]) {
+        expect(side.hunks).toHaveLength(1);
+        expect(side.hunks[0].lines.every((l) => l.type === "delete")).toBe(true);
+      }
     });
   });
 });

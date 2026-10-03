@@ -11,7 +11,7 @@
 import { createServer } from "node:http";
 import { execSync, execFileSync, spawnSync, spawn } from "node:child_process";
 import { readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync, unlinkSync, realpathSync, renameSync, mkdirSync, mkdtempSync, rmSync, copyFileSync, watch } from "node:fs";
-import { resolve, join, dirname, basename, sep, isAbsolute } from "node:path";
+import { resolve, join, dirname, basename, sep, isAbsolute, relative } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { Socket } from "node:net";
 import { createRequire } from "node:module";
@@ -51,22 +51,33 @@ function safeRepoPath(cwd, relPath) {
     throw new Error(`cwd does not resolve: ${e.message}`);
   }
 
-  const joined = join(cwdCanonical, relPath);
+  // `resolve`, not `join`: an absolute `relPath` must replace the root, as
+  // Rust's `Path::join` does, so it is judged as the file it names rather than
+  // as a harmless-looking `<cwd>/etc/passwd`.
+  const joined = resolve(cwdCanonical, relPath);
 
-  // For writes the target file may not exist yet — canonicalize the parent
-  // and reassemble the final path.
+  // The path may not exist (a file about to be written, or one whose deletion
+  // is being diffed, possibly with its whole directory). Canonicalize the
+  // deepest ancestor that does exist and append the missing tail, which holds
+  // no symlink since none of it exists. `resolve` has already folded any `..`.
+  // Mirrors the Rust helper.
   let resolved;
   try {
     resolved = realpathSync(joined);
   } catch {
-    const parent = dirname(joined);
-    let parentCanonical;
-    try {
-      parentCanonical = realpathSync(parent);
-    } catch (e) {
-      throw new Error(`parent path does not resolve: ${e.message}`);
+    let ancestor = dirname(joined);
+    let ancestorCanonical;
+    for (;;) {
+      try {
+        ancestorCanonical = realpathSync(ancestor);
+        break;
+      } catch (e) {
+        const up = dirname(ancestor);
+        if (up === ancestor) throw new Error(`path has no resolvable ancestor: ${e.message}`);
+        ancestor = up;
+      }
     }
-    resolved = join(parentCanonical, basename(joined));
+    resolved = join(ancestorCanonical, relative(ancestor, joined));
   }
 
   if (resolved !== cwdCanonical && !resolved.startsWith(cwdCanonical + sep)) {
@@ -2466,6 +2477,15 @@ async function handleRequest(req, res) {
 
       if (!cwd || !path) return jsonResponse(req, res, { error: "Missing cwd or path param" }, 400);
 
+      // Every branch below hands `path` to git, and the untracked fallback
+      // runs `git diff --no-index`, which reads whatever file it names. Refuse
+      // anything resolving outside the repo first, like Rust's `git_diff`.
+      try {
+        safeRepoPath(cwd, path);
+      } catch (e) {
+        return jsonResponse(req, res, { error: e.message }, 400);
+      }
+
       try {
         const resolvedCwd = resolve(cwd);
 
@@ -2522,7 +2542,7 @@ async function handleRequest(req, res) {
             // then truncate the same way as the plain diff. The repo-relative
             // path (as in Rust) keeps the header, hence the byte count and the
             // cut, identical on both sides.
-            const r = spawnSync("git", ["diff", "--no-index", "--", "/dev/null", path], {
+            const r = spawnSync(GIT, ["diff", "--no-index", "--", "/dev/null", path], {
               cwd: resolvedCwd, maxBuffer: Infinity,
             });
             ({ text: stdout, truncatedFromBytes } = truncateDiffOutput(r.stdout || Buffer.alloc(0)));

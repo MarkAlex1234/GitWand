@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Three diff panels never appeared in the packaged app.** On the desktop path, `getGitDiff` rebuilt the diff from its path and hunks only, and dropped every other field the Rust command sends. So the "diff truncated at 5 MB" banner, the untracked-directory panel and the nested-repository panel (issue #183) never rendered, while they did under `pnpm dev:web`. The wrapper now passes those fields through.
 - **Untracked files over 5 MB are now truncated like other diffs.** `git_diff` capped the plain `git diff` output at 5 MB but not the `--no-index` fallback that renders an untracked file, so a huge new file streamed its whole content to the UI. Both outputs now go through the same 5 MB cut and report `truncatedFromBytes`, and the `pnpm dev:web` server applies the same cap.
 
+### Security
+- **`git_diff` now refuses paths outside the repository.** It never checked the path it was given, and its untracked-file fallback (`git diff --no-index`) reads whatever file that path names, so a `../` or absolute path, or a symlink leading out of the repo, could render a file outside it. The path now goes through `safe_repo_path` first, in the app and in the `pnpm dev:web` server, and a deleted file whose whole folder is gone still diffs.
+
 ## [3.11.1] - 2026-09-25
 
 ### Added

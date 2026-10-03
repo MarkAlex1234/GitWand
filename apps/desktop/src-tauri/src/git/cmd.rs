@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -91,13 +91,33 @@ pub(crate) fn safe_repo_path(cwd: &str, rel_path: &str) -> Result<PathBuf, Strin
 
     let resolved = match joined.canonicalize() {
         Ok(p) => p,
+        // The path does not exist (a file about to be written, or one whose
+        // deletion is being diffed, possibly with its whole directory). Resolve
+        // the deepest ancestor that does exist, symlinks included, then append
+        // the missing tail. Nothing in that tail exists, so it cannot hold a
+        // symlink; it may only be plain names, never `..`, which would be
+        // resolved lexically against a directory the OS never saw.
         Err(_) => {
-            let parent = joined.parent().ok_or("path has no parent")?;
-            let parent_canonical = parent
-                .canonicalize()
-                .map_err(|e| format!("parent path does not resolve: {}", e))?;
-            let file_name = joined.file_name().ok_or("path has no file name")?;
-            parent_canonical.join(file_name)
+            let (base, tail) = joined
+                .ancestors()
+                .skip(1)
+                .find_map(|a| a.canonicalize().ok().map(|c| (a, c)))
+                .map(|(a, c)| (c, joined.strip_prefix(a).unwrap_or(&joined)))
+                .ok_or("path has no resolvable ancestor")?;
+            let mut resolved = base;
+            for component in tail.components() {
+                match component {
+                    Component::Normal(name) => resolved.push(name),
+                    Component::CurDir => {}
+                    _ => {
+                        return Err(format!(
+                            "path does not resolve: {} (`..` below a missing directory)",
+                            joined.display()
+                        ))
+                    }
+                }
+            }
+            resolved
         }
     };
 
@@ -649,6 +669,63 @@ mod tests {
         fn empty_configured_string_is_treated_as_unset() {
             let repo = TempRepo::new_trunk();
             assert_eq!(resolve_default_branch(&repo.cwd(), Some("  ")), "trunk");
+        }
+    }
+
+    // ── safe_repo_path: paths that do not exist ────────────────────────────
+
+    mod safe_repo_path_missing_tests {
+        use super::super::safe_repo_path;
+        use std::path::PathBuf;
+
+        /// A canonical temp dir, removed on drop.
+        struct Dir(PathBuf);
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        fn dir() -> Dir {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let p = std::env::temp_dir().join(format!(
+                "gitwand-safe-repo-path-{}-{}",
+                std::process::id(),
+                nanos
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Dir(p.canonicalize().unwrap())
+        }
+
+        #[test]
+        fn accepts_a_missing_file_under_missing_directories() {
+            // A deleted file whose whole directory went with it.
+            let d = dir();
+            let cwd = d.0.to_str().unwrap();
+            assert_eq!(
+                safe_repo_path(cwd, "gone/deep/f.txt").unwrap(),
+                d.0.join("gone/deep/f.txt")
+            );
+        }
+
+        #[test]
+        fn refuses_dotdot_below_a_missing_directory() {
+            let d = dir();
+            let cwd = d.0.to_str().unwrap();
+            assert!(safe_repo_path(cwd, "gone/../../x").is_err());
+            assert!(safe_repo_path(cwd, "gone/../x").is_err());
+        }
+
+        #[test]
+        fn refuses_a_missing_path_outside_cwd() {
+            let d = dir();
+            let cwd = d.0.to_str().unwrap();
+            let err = safe_repo_path(cwd, "../no-such-dir/x").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
+            let err = safe_repo_path(cwd, "/no-such-dir/x").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
         }
     }
 

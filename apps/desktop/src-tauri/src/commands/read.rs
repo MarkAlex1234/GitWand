@@ -762,6 +762,12 @@ fn truncate_diff_output(raw: &[u8]) -> (&[u8], Option<u64>) {
 
 #[tauri::command]
 pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<GitDiff, String> {
+    // Every mode below hands `path` to git, and the untracked fallback runs
+    // `git diff --no-index`, which reads whatever file it names. Refuse
+    // anything that resolves outside the repo (`..`, absolute, or through a
+    // symlink) before spawning anything. git keeps getting the repo-relative
+    // path; the resolved one is only the proof that it stays inside.
+    safe_repo_path(&cwd, &path)?;
     let _repo = repo_lock::read(&cwd);
     // A trailing slash means the sidebar handed us an untracked *directory*
     // entry, which has no diff. List what is inside instead so the UI can
@@ -3399,6 +3405,157 @@ mod pathspec_tests {
             "expected no unstaged hunks for a fully-staged tracked file, got {} hunk(s)",
             d.hunks.len()
         );
+    }
+
+    // ── git_diff path boundary (safe_repo_path) ───────────────
+    //
+    // The untracked `--no-index` fallback reads whatever file `path` names,
+    // so before `git_diff` validated `path` a `../` or absolute path rendered
+    // any readable file outside the repository.
+
+    const OUTSIDE_SECRET: &str = "outside-secret-content";
+
+    /// A file next to the repo (outside it), removed on drop.
+    struct OutsideFile {
+        path: PathBuf,
+    }
+    impl Drop for OutsideFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+    impl OutsideFile {
+        fn next_to(repo: &TempRepo) -> Self {
+            let name = format!(
+                "{}-outside.txt",
+                repo.path.file_name().unwrap().to_str().unwrap()
+            );
+            let path = repo.path.parent().unwrap().join(name);
+            std::fs::write(&path, format!("{OUTSIDE_SECRET}\n")).unwrap();
+            OutsideFile { path }
+        }
+        fn name(&self) -> String {
+            self.path.file_name().unwrap().to_str().unwrap().to_string()
+        }
+    }
+
+    fn diff(repo: &TempRepo, path: &str, staged: bool) -> Result<GitDiff, String> {
+        tauri::async_runtime::block_on(git_diff(repo.cwd(), path.to_string(), staged))
+    }
+
+    fn assert_refused_without_leak(res: Result<GitDiff, String>) {
+        match res {
+            Err(e) => assert!(
+                e.starts_with("path escapes cwd"),
+                "expected the safe_repo_path refusal, got: {e}"
+            ),
+            Ok(d) => panic!(
+                "git_diff must refuse a path outside the repo; leaked content: {}",
+                d.hunks
+                    .iter()
+                    .flat_map(|h| &h.lines)
+                    .any(|l| l.content.contains(OUTSIDE_SECRET))
+            ),
+        }
+    }
+
+    fn committed_repo() -> TempRepo {
+        let repo = TempRepo::new();
+        repo.write("root.txt", "root\n");
+        repo.commit_all("init");
+        repo
+    }
+
+    #[test]
+    fn git_diff_refuses_a_dotdot_path_outside_the_repo() {
+        let repo = committed_repo();
+        let outside = OutsideFile::next_to(&repo);
+        assert_refused_without_leak(diff(&repo, &format!("../{}", outside.name()), false));
+        assert_refused_without_leak(diff(&repo, &format!("../{}", outside.name()), true));
+    }
+
+    #[test]
+    fn git_diff_refuses_an_absolute_path_outside_the_repo() {
+        let repo = committed_repo();
+        let outside = OutsideFile::next_to(&repo);
+        assert_refused_without_leak(diff(&repo, outside.path.to_str().unwrap(), false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_diff_refuses_an_untracked_symlink_pointing_outside() {
+        let repo = committed_repo();
+        let outside = OutsideFile::next_to(&repo);
+        let outside_dir = repo.path.parent().unwrap().join(format!(
+            "{}-outdir",
+            repo.path.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("s.txt"), format!("{OUTSIDE_SECRET}\n")).unwrap();
+        std::os::unix::fs::symlink(&outside.path, repo.path.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, repo.path.join("linkdir")).unwrap();
+
+        assert_refused_without_leak(diff(&repo, "link.txt", false));
+        assert_refused_without_leak(diff(&repo, "linkdir/s.txt", false));
+        assert_refused_without_leak(diff(&repo, "linkdir/", false));
+        let _ = std::fs::remove_dir_all(&outside_dir);
+    }
+
+    #[test]
+    fn git_diff_still_diffs_a_staged_edit() {
+        let repo = committed_repo();
+        repo.write("root.txt", "ROOT\n");
+        repo.git(&["add", "--", "root.txt"]);
+        let d = diff(&repo, "root.txt", true).expect("staged diff");
+        assert_eq!(d.hunks.len(), 1);
+    }
+
+    #[test]
+    fn git_diff_still_diffs_a_deleted_tracked_file() {
+        let repo = TempRepo::new();
+        repo.write("gone.txt", "bye\n");
+        repo.write("old/deep/nested.txt", "deep\n");
+        repo.commit_all("init");
+        std::fs::remove_file(repo.path.join("gone.txt")).unwrap();
+        // The whole directory goes too: no ancestor of the path exists below
+        // the repo root, which `safe_repo_path` must still accept.
+        std::fs::remove_dir_all(repo.path.join("old")).unwrap();
+
+        for p in ["gone.txt", "old/deep/nested.txt"] {
+            let d = diff(&repo, p, false).unwrap_or_else(|e| panic!("unstaged {p}: {e}"));
+            assert_eq!(d.hunks.len(), 1, "unstaged {p}");
+            assert!(d.hunks[0].lines.iter().all(|l| l.r#type == "delete"));
+        }
+
+        repo.git(&["add", "-A"]);
+        for p in ["gone.txt", "old/deep/nested.txt"] {
+            let d = diff(&repo, p, true).unwrap_or_else(|e| panic!("staged {p}: {e}"));
+            assert_eq!(d.hunks.len(), 1, "staged {p}");
+            assert!(d.hunks[0].lines.iter().all(|l| l.r#type == "delete"));
+        }
+    }
+
+    #[test]
+    fn git_diff_still_lists_an_untracked_directory() {
+        let repo = committed_repo();
+        repo.write("newdir/a.txt", "a\n");
+        let d = diff(&repo, "newdir/", false).expect("directory diff");
+        assert_eq!(d.is_directory, Some(true));
+        assert_eq!(d.new_files, Some(vec!["newdir/a.txt".to_string()]));
+    }
+
+    #[test]
+    fn git_diff_handles_a_path_with_a_space_and_an_accent() {
+        let repo = committed_repo();
+        repo.write("dossier é/fichier é.txt", "un\n");
+        repo.commit_all("accent");
+        repo.write("dossier é/fichier é.txt", "deux\n");
+        let d = diff(&repo, "dossier é/fichier é.txt", false).expect("tracked accent");
+        assert_eq!(d.hunks.len(), 1);
+
+        repo.write("dossier é/nouveau é.txt", "neuf\n");
+        let d = diff(&repo, "dossier é/nouveau é.txt", false).expect("untracked accent");
+        assert_eq!(d.status.as_deref(), Some("added"));
     }
 }
 
