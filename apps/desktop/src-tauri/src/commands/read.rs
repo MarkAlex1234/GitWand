@@ -3585,6 +3585,21 @@ mod pathspec_tests {
         }
     }
 
+    /// The deleted file's folder was replaced by a regular file of the same
+    /// name: the path no longer resolves (ENOTDIR), the deletion must still
+    /// be diffable.
+    #[test]
+    fn git_diff_still_diffs_a_deleted_file_whose_folder_is_now_a_file() {
+        let repo = TempRepo::new();
+        repo.write("secret/x", "gone\n");
+        repo.commit_all("init");
+        std::fs::remove_dir_all(repo.path.join("secret")).unwrap();
+        std::fs::write(repo.path.join("secret"), "now a file\n").unwrap();
+        let d = diff(&repo, "secret/x", false).expect("deleted below a file");
+        assert_eq!(d.hunks.len(), 1);
+        assert!(d.hunks[0].lines.iter().all(|l| l.r#type == "delete"));
+    }
+
     #[test]
     fn git_diff_still_lists_an_untracked_directory() {
         let repo = committed_repo();

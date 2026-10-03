@@ -19,8 +19,8 @@
  */
 
 import { describe, it, beforeAll, afterAll, expect } from "vitest";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { startDevServer } from "./dev-server-runner.mjs";
 import { assertParity } from "./harness.mjs";
 import { runProbe } from "./probe.mjs";
@@ -226,6 +226,65 @@ describe("parity: git-diff", () => {
       expect(rust.hunks).toHaveLength(1);
       for (const path of [".", "./"]) {
         expect(await bothRefuse(cwd, path)).toBe("path must not be the repository root");
+      }
+    });
+
+    it("a deleted file whose folder is now a regular file still diffs identically", async () => {
+      const cwd = mkTempRepo("gw-parity-diff-notdir-");
+      commitFile(cwd, "secret/x", "gone\n", "init", 0);
+      rmSync(join(cwd, "secret"), { recursive: true });
+      writeFileSync(join(cwd, "secret"), "now a file\n");
+      const { rust } = await assertParity(dev, {
+        command: "git-diff",
+        args: { cwd, path: "secret/x", staged: false },
+        httpPath: `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent("secret/x")}&staged=false`,
+      });
+      expect(rust.hunks).toHaveLength(1);
+
+      // A symlink to a file in that position is not a regular file: refused.
+      symlinkSync(join(cwd, "secret"), join(cwd, "inlink"));
+      expect(await bothRefuse(cwd, "inlink/x")).toMatch(
+        /^path does not resolve: .* \(dangling, looping or unreadable component\)$/,
+      );
+    });
+
+    // The cwd as the caller spells it may differ from the on-disk name (letter
+    // case, or NFC vs NFD on macOS). Both sides must canonicalize it the same
+    // way as the paths below it, or every in-repo path looks like an escape.
+    describe("a cwd spelled differently from the disk", () => {
+      /** Rename the repo dir to `onDisk`, return the cwd spelled `given`. */
+      function respell(cwd, onDisk, given) {
+        const disk = join(dirname(cwd), onDisk);
+        renameSync(cwd, disk);
+        return join(dirname(cwd), given);
+      }
+
+      for (const [label, onDisk, given] of [
+        ["letter case", "Repo-case", "REPO-CASE"],
+        ["NFC vs NFD", "d\u0065\u0301p-norm", "d\u00e9p-norm"],
+      ]) {
+        it(`${label}: in-repo paths are accepted, escapes still refused`, async (ctx) => {
+          const base = mkTempRepo("gw-parity-diff-spelling-");
+          commitFile(base, "a.txt", "a\n", "init", 0);
+          writeFileSync(join(base, "a.txt"), "A\n");
+          const cwd = respell(base, `${basename(base)}-${onDisk}`, `${basename(base)}-${given}`);
+          // Only meaningful on a filesystem that folds the two spellings.
+          if (!existsSync(join(cwd, "a.txt"))) return ctx.skip();
+          const { rust, node } = await assertParity(dev, {
+            command: "git-diff",
+            args: { cwd, path: "a.txt", staged: false },
+            httpPath: `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=a.txt&staged=false`,
+          });
+          expect(rust.hunks).toHaveLength(1);
+          expect(node.hunks).toHaveLength(1);
+          const outside = join(dirname(cwd), `${basename(base)}-outside.txt`);
+          writeFileSync(outside, `${SECRET}\n`);
+          try {
+            expect(await bothRefuse(cwd, `../${basename(outside)}`)).toMatch(/^path escapes cwd/);
+          } finally {
+            rmSync(outside, { force: true });
+          }
+        });
       }
     });
 

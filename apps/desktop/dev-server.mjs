@@ -46,7 +46,10 @@ function safeRepoPath(cwd, relPath) {
 
   let cwdCanonical;
   try {
-    cwdCanonical = realpathSync(cwd);
+    // `.native`, like every resolution below: the JS `realpathSync` keeps the
+    // caller's spelling (letter case, NFC/NFD on macOS) while the native one
+    // returns the on-disk name, and mixing the two made every path an escape.
+    cwdCanonical = realpathSync.native(cwd);
   } catch (e) {
     throw new Error(`cwd does not resolve: ${e.message}`);
   }
@@ -76,7 +79,11 @@ function safeRepoPath(cwd, relPath) {
       new Error(`path does not resolve: ${joined} (dangling, looping or unreadable component)`);
     let leafIsSymlink = false;
     try { leafIsSymlink = lstatSync(joined).isSymbolicLink(); } catch { /* not a symlink */ }
-    if (!isAbsent(joined, err) && !leafIsSymlink) throw unresolvable();
+    // ENOTDIR: a component on the way is a regular file (a deleted `secret/x`
+    // whose folder became a file `secret`); absent too, once the file is found
+    // to be a regular file and not a symlink. Mirrors Rust.
+    let belowAFile = isNotDir(joined, err);
+    if (!isAbsent(joined, err) && !belowAFile && !leafIsSymlink) throw unresolvable();
 
     let ancestor = joined;
     let base;
@@ -88,8 +95,14 @@ function safeRepoPath(cwd, relPath) {
         base = realpathSync.native(ancestor);
         break;
       } catch (e) {
-        if (!isAbsent(ancestor, e)) throw unresolvable();
+        if (isNotDir(ancestor, e)) belowAFile = true;
+        else if (!isAbsent(ancestor, e)) throw unresolvable();
       }
+    }
+    if (belowAFile) {
+      let isFile = false;
+      try { isFile = lstatSync(ancestor).isFile(); } catch { /* not a file */ }
+      if (!isFile) throw unresolvable();
     }
     const segments = [];
     for (const seg of joined.slice(ancestor.length).split(sep)) {
@@ -122,6 +135,21 @@ function isAbsent(p, err) {
     return false;
   } catch (e) {
     return e.code === "ENOENT";
+  }
+}
+
+/**
+ * `true` when `p` failed to resolve because a component on the way is not a
+ * directory (ENOTDIR), as seen without following a final symlink. Mirrors
+ * Rust's `is_not_dir`.
+ */
+function isNotDir(p, err) {
+  if (err?.code !== "ENOTDIR") return false;
+  try {
+    lstatSync(p);
+    return false;
+  } catch (e) {
+    return e.code === "ENOTDIR";
   }
 }
 

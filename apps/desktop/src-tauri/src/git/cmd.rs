@@ -117,7 +117,12 @@ pub(crate) fn safe_repo_path(cwd: &str, rel_path: &str) -> Result<PathBuf, Strin
                 .symlink_metadata()
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false);
-            if !is_absent(&joined, &e) && !leaf_is_symlink {
+            // ENOTDIR: a component on the way is a regular file, e.g. a
+            // deleted `secret/x` whose folder was replaced by a file named
+            // `secret`. Below a regular file nothing can exist, so that is
+            // absent too, checked once the file is found.
+            let mut below_a_file = is_not_dir(&joined, &e);
+            if !is_absent(&joined, &e) && !below_a_file && !leaf_is_symlink {
                 return Err(unresolvable());
             }
             let mut found = None;
@@ -128,10 +133,21 @@ pub(crate) fn safe_repo_path(cwd: &str, rel_path: &str) -> Result<PathBuf, Strin
                         break;
                     }
                     Err(e) if is_absent(ancestor, &e) => continue,
+                    Err(e) if is_not_dir(ancestor, &e) => below_a_file = true,
                     Err(_) => return Err(unresolvable()),
                 }
             }
             let (ancestor, base) = found.ok_or("path has no resolvable ancestor")?;
+            // Only a regular file: a symlink to a file, in that position, is
+            // refused like any other unresolvable component.
+            if below_a_file
+                && !ancestor
+                    .symlink_metadata()
+                    .map(|m| m.file_type().is_file())
+                    .unwrap_or(false)
+            {
+                return Err(unresolvable());
+            }
             let tail = joined.strip_prefix(ancestor).unwrap_or(&joined);
             let mut resolved = base;
             for component in tail.components() {
@@ -159,6 +175,13 @@ pub(crate) fn safe_repo_path(cwd: &str, rel_path: &str) -> Result<PathBuf, Strin
     }
 
     Ok(resolved)
+}
+
+/// `true` when `path` failed to canonicalize because a component on the way is
+/// not a directory (ENOTDIR), as seen without following a final symlink.
+fn is_not_dir(path: &Path, canonicalize_err: &std::io::Error) -> bool {
+    canonicalize_err.kind() == std::io::ErrorKind::NotADirectory
+        && matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotADirectory)
 }
 
 /// `true` when `path` failed to canonicalize only because nothing exists
@@ -832,6 +855,38 @@ mod tests {
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
             let err = res.unwrap_err();
             assert!(err.starts_with("path does not resolve"), "{err}");
+        }
+
+        /// A deleted `secret/x` whose folder was later replaced by a regular
+        /// file named `secret`: resolving fails with ENOTDIR, not ENOENT, and
+        /// the path is still just a missing file inside the repo.
+        #[cfg(unix)]
+        #[test]
+        fn accepts_a_missing_path_below_a_regular_file() {
+            let (_d, cwd, _out) = repo_and_outside();
+            std::fs::write(format!("{cwd}/secret"), "now a file").unwrap();
+            for rel in ["secret/x", "secret/a/b"] {
+                assert_eq!(
+                    safe_repo_path(&cwd, rel).unwrap(),
+                    PathBuf::from(format!("{cwd}/{rel}")),
+                    "{rel}"
+                );
+            }
+        }
+
+        /// The ENOTDIR allowance is for a regular file only: a symlink to a
+        /// file (inside or outside the repo) in that position is refused.
+        #[cfg(unix)]
+        #[test]
+        fn refuses_a_missing_path_below_a_symlink_to_a_file() {
+            let (_d, cwd, out) = repo_and_outside();
+            std::fs::write(out.join("f"), "out").unwrap();
+            std::fs::write(format!("{cwd}/f"), "in").unwrap();
+            std::os::unix::fs::symlink(out.join("f"), format!("{cwd}/outlink")).unwrap();
+            std::os::unix::fs::symlink(format!("{cwd}/f"), format!("{cwd}/inlink")).unwrap();
+            for rel in ["outlink/x", "inlink/x"] {
+                assert!(safe_repo_path(&cwd, rel).is_err(), "{rel}");
+            }
         }
 
         /// A dangling symlink as the LAST component is not followed: a
