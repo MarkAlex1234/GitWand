@@ -377,14 +377,14 @@ function toggleLock() {
 
 function onUndo() {
   const libs = peekCodeMirror();
-  if (editLocked.value || !cm.view.value || !libs) return;
+  if (editLocked.value || editorPending.value || !cm.view.value || !libs) return;
   libs.undo(cm.view.value); // dispatches internally; the existing updateListener
   // (see updateListenerFor) picks up the resulting docChanged transaction
   // and syncs it into useFileExplorer's tab.content, same as any keystroke.
 }
 
 function onToolbarSave() {
-  if (!activeTab.value || activeTab.value.binary) return;
+  if (!activeTab.value || activeTab.value.binary || editorPending.value) return;
   explorer.saveTab(props.repoPath, props.repoPath, activeTab.value.id);
 }
 
@@ -470,6 +470,11 @@ watch(
 // void once the user asked for either side again (Diff then File, say).
 const viewRequests = new Map<string, number>();
 let viewRequestSeq = 0;
+// Per tab (viewKey), the number of leaving-Diff re-reads in flight. While one
+// is pending for the active tab, its buffer may predate the disk file: the
+// editor stays hidden and Lock/Edit, Undo, Blame, Save and ⌘S are off.
+const reloadPending = reactive(new Map<string, number>());
+const editorPending = computed(() => activeTab.value !== null && reloadPending.has(viewKey(activeTab.value.id)));
 
 async function setView(view: TabView): Promise<void> {
   const tab = activeTab.value;
@@ -493,15 +498,25 @@ async function setView(view: TabView): Promise<void> {
   // text, make the reload decline as dirty, and a save would then overwrite
   // the newer disk file. The cached editor state and blame built from the old
   // text are dropped for THAT tab, whichever is active by the time the read
-  // lands.
-  if (await explorer.reloadTab(repo, repo, tab.id)) {
-    docStates.delete(tab.id);
-    blameModels.delete(tab.id);
+  // lands. The diff is not always there to cover the read: when the watcher
+  // falls back because the file has no diff any more, the tab already resolves
+  // to File. `reloadPending` hides the editor and disables its actions until
+  // the read lands, whichever way we got here.
+  reloadPending.set(k, (reloadPending.get(k) ?? 0) + 1);
+  try {
+    if (await explorer.reloadTab(repo, repo, tab.id)) {
+      docStates.delete(tab.id);
+      blameModels.delete(tab.id);
+    }
+    // Do not override a side the user chose, or a repo switched, in the meantime.
+    if (props.repoPath !== repo || tabViews.get(k) !== "diff" || viewRequests.get(k) !== request) return;
+    tabViews.set(k, "file");
+    if (activeTab.value?.id === tab.id) await mountTab(tab);
+  } finally {
+    const left = (reloadPending.get(k) ?? 1) - 1;
+    if (left > 0) reloadPending.set(k, left);
+    else reloadPending.delete(k);
   }
-  // Do not override a side the user chose, or a repo switched, in the meantime.
-  if (props.repoPath !== repo || tabViews.get(k) !== "diff" || viewRequests.get(k) !== request) return;
-  tabViews.set(k, "file");
-  if (activeTab.value?.id === tab.id) await mountTab(tab);
 }
 
 function diffPlaceholder(body: Extract<PreviewBody, { kind: "placeholder" }>): string {
@@ -545,7 +560,7 @@ function onKeyDown(e: KeyboardEvent) {
   if (!shortcut || !activeTab.value) return;
   if (shortcut === "save") {
     e.preventDefault();
-    if (!activeTab.value.binary) explorer.saveTab(props.repoPath, props.repoPath, activeTab.value.id);
+    if (!activeTab.value.binary && !editorPending.value) explorer.saveTab(props.repoPath, props.repoPath, activeTab.value.id);
   } else if (shortcut === "close") {
     e.preventDefault();
     onTabClose(activeTab.value.id);
@@ -573,7 +588,7 @@ function onKeyDown(e: KeyboardEvent) {
         <button
           class="fe__action-btn"
           :class="{ 'fe__action-btn--active': !editLocked }"
-          :disabled="showDiff"
+          :disabled="showDiff || editorPending"
           :title="editLocked ? t('files.toolbarEdit') : t('files.toolbarLock')"
           @click="toggleLock"
         >
@@ -589,7 +604,7 @@ function onKeyDown(e: KeyboardEvent) {
         </button>
         <button
           class="fe__action-btn"
-          :disabled="!activeTab || activeTab.binary || !explorer.isDirty(activeTab)"
+          :disabled="!activeTab || activeTab.binary || !explorer.isDirty(activeTab) || editorPending"
           :title="t('files.toolbarSave')"
           @click="onToolbarSave"
         >
@@ -601,7 +616,7 @@ function onKeyDown(e: KeyboardEvent) {
           <span>{{ t("files.toolbarSave") }}</span>
         </button>
         <span class="fe__header-divider" aria-hidden="true" />
-        <button class="fe__action-btn" :disabled="editLocked || showDiff" :title="t('files.toolbarUndo')" @click="onUndo">
+        <button class="fe__action-btn" :disabled="editLocked || showDiff || editorPending" :title="t('files.toolbarUndo')" @click="onUndo">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M3 7v6h6"/>
             <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>
@@ -611,7 +626,7 @@ function onKeyDown(e: KeyboardEvent) {
         <button
           class="fe__action-btn"
           :class="{ 'fe__action-btn--active': blameEnabled }"
-          :disabled="!activeTab || activeTab.binary || explorer.isDirty(activeTab) || showDiff"
+          :disabled="!activeTab || activeTab.binary || explorer.isDirty(activeTab) || showDiff || editorPending"
           :title="t('files.toolbarBlame')"
           @click="toggleBlame"
         >
@@ -723,7 +738,8 @@ function onKeyDown(e: KeyboardEvent) {
           </button>
         </div>
         <p v-if="activeTab && activeStatus?.deletedOnDisk" class="fe__notice" role="status">{{ t('filesView.preview.gone') }}</p>
-        <div v-show="activeTab && !activeTab.binary && !showDiff" class="fe__content" ref="editorHost"></div>
+        <div v-show="activeTab && !activeTab.binary && !showDiff && !editorPending" class="fe__content" ref="editorHost"></div>
+        <p v-if="activeTab && !showDiff && editorPending" class="fe__empty" aria-busy="true">{{ t('filesView.loading') }}</p>
         <div v-if="activeTab && activeTab.binary && !showDiff" class="fe__empty">{{ t("files.binaryPlaceholder") }}</div>
         <div v-if="activeTab && showDiff" class="fe__diff">
           <p v-if="diffBody.kind === 'idle' || diffBody.kind === 'loading'" class="fe__empty" aria-busy="true">{{ t('filesView.loading') }}</p>

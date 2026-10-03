@@ -908,6 +908,60 @@ describe("FileExplorerPanel — Diff | File lifecycle (v3.11.2)", () => {
     expect(diffPath()).toBeNull();
   });
 
+  it("falling back to File because the diff is gone: no stale editor until the re-read lands", async () => {
+    const { state } = mountPanel([MOD_A]);
+    await settle();
+    const btn = (title: string) =>
+      [...container.querySelectorAll<HTMLButtonElement>(".fe__header-actions .fe__action-btn")].find(
+        (b) => b.title === title,
+      )!;
+    // Unlock on an unchanged tab (Lock/Edit is panel-wide), then open the changed one on its diff.
+    await openTab("b.ts");
+    btn(en.files.toolbarEdit).click();
+    await settle(5);
+    await openTab("a.ts");
+    expect(diffPath()).toBe("a.ts");
+    files["a.ts"] = "const a = 42;\n"; // e.g. the change was discarded in Changes
+    const gate = deferred<string>();
+    vi.mocked(readFile).mockImplementationOnce(() => gate.promise);
+    state.changedFiles = []; // no diff any more: the watcher falls back to File
+    await settle(3);
+    expect(diffPath()).toBeNull();
+    expect(editorShown()).toBe(false);
+    expect(container.querySelector(".fe__editor-pane [aria-busy=true]")).not.toBeNull();
+    expect(btn(en.files.toolbarSave).disabled).toBe(true);
+    expect(btn(en.files.toolbarUndo).disabled).toBe(true);
+    expect(btn(en.files.toolbarLock).disabled).toBe(true);
+    expect(btn(en.files.toolbarBlame).disabled).toBe(true);
+    gate.resolve("const a = 42;\n");
+    await settle();
+    expect(container.querySelector(".fe__editor-pane [aria-busy=true]")).toBeNull();
+    expect(editorShown()).toBe(true);
+    expect(editorDoc()).toContain("const a = 42;");
+    expect(editorDoc()).not.toContain("const a = 1;");
+    expect(btn(en.files.toolbarUndo).disabled).toBe(false);
+  });
+
+  it("⌘S does nothing while the fallback re-read is pending", async () => {
+    const { state } = mountPanel([MOD_A]);
+    await settle();
+    await openTab("a.ts");
+    const gate = deferred<string>();
+    vi.mocked(readFile).mockImplementationOnce(() => gate.promise);
+    const explorer = useFileExplorer();
+    const tab = explorer.tabsFor(REPO)[0];
+    state.changedFiles = [];
+    await settle(3);
+    explorer.updateContent(REPO, tab.id, "stale edit\n"); // the old buffer turns dirty mid-read
+    container
+      .querySelector<HTMLElement>(".fe")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "s", metaKey: true, ctrlKey: true, bubbles: true, cancelable: true }));
+    await settle(3);
+    expect(vi.mocked(writeFile)).not.toHaveBeenCalled();
+    gate.resolve("const a = 1;\n");
+    await settle();
+  });
+
   it("says Deleted from disk and keeps the buffer", async () => {
     const { state } = mountPanel([MOD_A]);
     await settle();
