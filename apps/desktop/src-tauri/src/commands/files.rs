@@ -28,6 +28,19 @@ pub(crate) async fn read_file(cwd: String, path: String) -> Result<String, Strin
 #[tauri::command]
 pub(crate) async fn write_file(cwd: String, path: String, content: String) -> Result<(), String> {
     let full = safe_repo_path(&cwd, &path)?;
+    // `safe_repo_path` resolves a symlink that leads somewhere real, so `full`
+    // is only still a symlink when it dangles (or loops). Writing through it
+    // would create its target, wherever that is, including outside the repo.
+    if full
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "refusing to write through a symlink that does not resolve: {}",
+            path
+        ));
+    }
     std::fs::write(&full, &content).map_err(|e| format!("Failed to write {}: {}", path, e))
 }
 
@@ -611,6 +624,88 @@ mod list_repo_tree_tests {
     fn rejects_empty_cwd() {
         let err = build_repo_tree("").unwrap_err();
         assert!(err.contains("cwd must not be empty"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod write_file_tests {
+    use super::list_repo_tree_tests::TempRepo;
+    use super::*;
+
+    fn write(repo: &TempRepo, path: &str) -> Result<(), String> {
+        tauri::async_runtime::block_on(write_file(repo.cwd(), path.to_string(), "new".into()))
+    }
+
+    /// A sibling of the repo, removed on drop.
+    struct Outside(PathBuf);
+    impl Drop for Outside {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn outside(repo: &TempRepo) -> Outside {
+        let mut name = repo.path.file_name().unwrap().to_os_string();
+        name.push("-outside");
+        let p = repo.path.parent().unwrap().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        Outside(p)
+    }
+
+    /// Writing through a dangling symlink creates its target, wherever that
+    /// is: this used to create a file outside the repository.
+    #[test]
+    fn refuses_a_dangling_leaf_symlink_and_creates_nothing() {
+        let repo = TempRepo::new("write-dangling");
+        let out = outside(&repo);
+        let target = out.0.join("newfile");
+        std::os::unix::fs::symlink(&target, repo.path.join("danglingleaf")).unwrap();
+        let err = write(&repo, "danglingleaf").unwrap_err();
+        assert!(
+            err.starts_with("refusing to write through a symlink"),
+            "{err}"
+        );
+        assert!(
+            !target.exists(),
+            "write_file created a file outside the repo"
+        );
+
+        let inside = repo.path.join("missing-in-repo");
+        std::os::unix::fs::symlink(&inside, repo.path.join("dangling-in")).unwrap();
+        assert!(write(&repo, "dangling-in").is_err());
+        assert!(!inside.exists());
+    }
+
+    #[test]
+    fn refuses_a_symlink_pointing_outside() {
+        let repo = TempRepo::new("write-out");
+        let out = outside(&repo);
+        std::fs::write(out.0.join("f"), "orig").unwrap();
+        std::os::unix::fs::symlink(out.0.join("f"), repo.path.join("link")).unwrap();
+        assert!(write(&repo, "link").is_err());
+        assert_eq!(std::fs::read_to_string(out.0.join("f")).unwrap(), "orig");
+    }
+
+    #[test]
+    fn still_writes_plain_new_and_in_repo_symlinked_files() {
+        let repo = TempRepo::new("write-ok");
+        repo.write("a.txt", "old");
+        write(&repo, "a.txt").expect("plain file");
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("a.txt")).unwrap(),
+            "new"
+        );
+        write(&repo, "brand-new.txt").expect("new file");
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("brand-new.txt")).unwrap(),
+            "new"
+        );
+        repo.write("t.txt", "old");
+        std::os::unix::fs::symlink(repo.path.join("t.txt"), repo.path.join("l.txt")).unwrap();
+        write(&repo, "l.txt").expect("in-repo symlink");
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("t.txt")).unwrap(),
+            "new"
+        );
     }
 }
 

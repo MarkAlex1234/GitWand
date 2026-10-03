@@ -93,17 +93,46 @@ pub(crate) fn safe_repo_path(cwd: &str, rel_path: &str) -> Result<PathBuf, Strin
         Ok(p) => p,
         // The path does not exist (a file about to be written, or one whose
         // deletion is being diffed, possibly with its whole directory). Resolve
-        // the deepest ancestor that does exist, symlinks included, then append
-        // the missing tail. Nothing in that tail exists, so it cannot hold a
-        // symlink; it may only be plain names, never `..`, which would be
-        // resolved lexically against a directory the OS never saw.
-        Err(_) => {
-            let (base, tail) = joined
-                .ancestors()
-                .skip(1)
-                .find_map(|a| a.canonicalize().ok().map(|c| (a, c)))
-                .map(|(a, c)| (c, joined.strip_prefix(a).unwrap_or(&joined)))
-                .ok_or("path has no resolvable ancestor")?;
+        // the deepest ancestor that does exist, symlinks included, on the
+        // filesystem (never lexically: `linkdir/..` is the parent of the
+        // link's target), then append the missing tail. Nothing in that tail
+        // exists, so it holds no symlink; it may only be plain names, never
+        // `..`, which would be folded against a directory the OS never saw.
+        //
+        // "Does not exist" must mean exactly that. A dangling, looping or
+        // unreadable symlink also fails to canonicalize; skipping over one
+        // would accept `dangling/x` as if `dangling` were an ordinary missing
+        // directory, so any such failure is a refusal. The last component
+        // alone may be a symlink that does not resolve: it is the path itself,
+        // and it is not followed here (callers that would follow it, like
+        // `write_file`, check for it).
+        Err(e) => {
+            let unresolvable = || {
+                format!(
+                    "path does not resolve: {} (dangling, looping or unreadable component)",
+                    joined.display()
+                )
+            };
+            let leaf_is_symlink = joined
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if !is_absent(&joined, &e) && !leaf_is_symlink {
+                return Err(unresolvable());
+            }
+            let mut found = None;
+            for ancestor in joined.ancestors().skip(1) {
+                match ancestor.canonicalize() {
+                    Ok(c) => {
+                        found = Some((ancestor, c));
+                        break;
+                    }
+                    Err(e) if is_absent(ancestor, &e) => continue,
+                    Err(_) => return Err(unresolvable()),
+                }
+            }
+            let (ancestor, base) = found.ok_or("path has no resolvable ancestor")?;
+            let tail = joined.strip_prefix(ancestor).unwrap_or(&joined);
             let mut resolved = base;
             for component in tail.components() {
                 match component {
@@ -130,6 +159,13 @@ pub(crate) fn safe_repo_path(cwd: &str, rel_path: &str) -> Result<PathBuf, Strin
     }
 
     Ok(resolved)
+}
+
+/// `true` when `path` failed to canonicalize only because nothing exists
+/// there: not a dangling or looping symlink, not an unreadable directory.
+fn is_absent(path: &Path, canonicalize_err: &std::io::Error) -> bool {
+    canonicalize_err.kind() == std::io::ErrorKind::NotFound
+        && matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 pub(crate) static GIT_BINARY: OnceLock<Mutex<String>> = OnceLock::new();
@@ -710,12 +746,106 @@ mod tests {
             );
         }
 
+        // Unix only: on Windows the canonical cwd is a verbatim `\\?\` path,
+        // and `PathBuf::push` onto one folds `..` lexically, so the
+        // "`..` below a missing directory" branch never fires there (the
+        // folded path is still checked against cwd).
+        #[cfg(unix)]
         #[test]
         fn refuses_dotdot_below_a_missing_directory() {
             let d = dir();
             let cwd = d.0.to_str().unwrap();
-            assert!(safe_repo_path(cwd, "gone/../../x").is_err());
-            assert!(safe_repo_path(cwd, "gone/../x").is_err());
+            for rel in ["gone/../../x", "gone/../x"] {
+                let err = safe_repo_path(cwd, rel).unwrap_err();
+                assert_eq!(
+                    err,
+                    format!(
+                        "path does not resolve: {}/{} (`..` below a missing directory)",
+                        cwd, rel
+                    )
+                );
+            }
+        }
+
+        /// `<root>/repo` (the cwd) next to `<root>/out` (outside it).
+        #[cfg(unix)]
+        fn repo_and_outside() -> (Dir, String, PathBuf) {
+            let d = dir();
+            let repo = d.0.join("repo");
+            let out = d.0.join("out");
+            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::create_dir_all(&out).unwrap();
+            let cwd = repo.to_str().unwrap().to_string();
+            (d, cwd, out)
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_a_missing_tail_below_a_symlink_leading_outside() {
+            let (_d, cwd, out) = repo_and_outside();
+            std::os::unix::fs::symlink(&out, format!("{cwd}/linkdir")).unwrap();
+            let err = safe_repo_path(&cwd, "linkdir/newfile").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
+        }
+
+        /// `linkdir/..` is the parent of the symlink's TARGET, not the repo:
+        /// folding `..` lexically would judge `linkdir/../secret` as the
+        /// repo's own `secret`.
+        #[cfg(unix)]
+        #[test]
+        fn refuses_dotdot_after_a_symlink_leading_outside() {
+            let (d, cwd, out) = repo_and_outside();
+            let sub = out.join("sub");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(out.join("secret"), "s").unwrap();
+            std::fs::write(format!("{cwd}/secret"), "in-repo").unwrap();
+            std::os::unix::fs::symlink(&sub, format!("{cwd}/linkdir")).unwrap();
+            let err = safe_repo_path(&cwd, "linkdir/../secret").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
+            let err = safe_repo_path(&cwd, "linkdir/../missing").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
+            drop(d);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_paths_below_a_dangling_or_looping_symlink() {
+            let (_d, cwd, out) = repo_and_outside();
+            std::os::unix::fs::symlink(out.join("nope"), format!("{cwd}/dangling")).unwrap();
+            std::os::unix::fs::symlink(format!("{cwd}/loop"), format!("{cwd}/loop")).unwrap();
+            for rel in ["dangling/x", "dangling/a/b", "loop/x"] {
+                let err = safe_repo_path(&cwd, rel).unwrap_err();
+                assert!(err.starts_with("path does not resolve"), "{rel}: {err}");
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_paths_below_an_unreadable_symlink() {
+            use std::os::unix::fs::PermissionsExt;
+            let (_d, cwd, out) = repo_and_outside();
+            let locked = out.join("locked");
+            std::fs::create_dir_all(locked.join("inner")).unwrap();
+            std::os::unix::fs::symlink(locked.join("inner"), format!("{cwd}/lockedlink")).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let res = safe_repo_path(&cwd, "lockedlink/x");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let err = res.unwrap_err();
+            assert!(err.starts_with("path does not resolve"), "{err}");
+        }
+
+        /// A dangling symlink as the LAST component is not followed: a
+        /// tracked symlink whose target is missing must still be diffable.
+        /// (`write_file` refuses to write through one on its own.)
+        #[cfg(unix)]
+        #[test]
+        fn accepts_a_dangling_leaf_symlink_as_itself() {
+            let (_d, cwd, out) = repo_and_outside();
+            std::os::unix::fs::symlink(out.join("nope"), format!("{cwd}/leaf")).unwrap();
+            assert_eq!(
+                safe_repo_path(&cwd, "leaf").unwrap(),
+                PathBuf::from(format!("{cwd}/leaf"))
+            );
         }
 
         #[test]

@@ -51,39 +51,108 @@ function safeRepoPath(cwd, relPath) {
     throw new Error(`cwd does not resolve: ${e.message}`);
   }
 
-  // `resolve`, not `join`: an absolute `relPath` must replace the root, as
-  // Rust's `Path::join` does, so it is judged as the file it names rather than
-  // as a harmless-looking `<cwd>/etc/passwd`.
-  const joined = resolve(cwdCanonical, relPath);
+  // Joined like Rust's `Path::join`: an absolute `relPath` replaces the root,
+  // and nothing is folded lexically. `path.resolve`/`join` would fold
+  // `linkdir/..` to the repo root, while the OS takes it to the parent of the
+  // link's TARGET, so the path is only ever resolved on the filesystem, with
+  // `realpathSync.native` (the JS `realpathSync` folds `..` first, too).
+  const joined = isAbsolute(relPath)
+    ? relPath
+    : cwdCanonical.endsWith(sep) ? cwdCanonical + relPath : cwdCanonical + sep + relPath;
 
   // The path may not exist (a file about to be written, or one whose deletion
   // is being diffed, possibly with its whole directory). Canonicalize the
   // deepest ancestor that does exist and append the missing tail, which holds
-  // no symlink since none of it exists. `resolve` has already folded any `..`.
-  // Mirrors the Rust helper.
+  // no symlink since none of it exists; it may only be plain names, never `..`.
+  // "Does not exist" means exactly that: a dangling, looping or unreadable
+  // symlink is a refusal, not a missing directory to skip. The last component
+  // alone may be a symlink that does not resolve (it is not followed here;
+  // `/api/write-file` checks for it). Mirrors the Rust helper, messages included.
   let resolved;
   try {
-    resolved = realpathSync(joined);
-  } catch {
-    let ancestor = dirname(joined);
-    let ancestorCanonical;
+    resolved = realpathSync.native(joined);
+  } catch (err) {
+    const unresolvable = () =>
+      new Error(`path does not resolve: ${joined} (dangling, looping or unreadable component)`);
+    let leafIsSymlink = false;
+    try { leafIsSymlink = lstatSync(joined).isSymbolicLink(); } catch { /* not a symlink */ }
+    if (!isAbsent(joined, err) && !leafIsSymlink) throw unresolvable();
+
+    let ancestor = joined;
+    let base;
     for (;;) {
+      const up = dirname(ancestor);
+      if (up === ancestor) throw new Error("path has no resolvable ancestor");
+      ancestor = up;
       try {
-        ancestorCanonical = realpathSync(ancestor);
+        base = realpathSync.native(ancestor);
         break;
       } catch (e) {
-        const up = dirname(ancestor);
-        if (up === ancestor) throw new Error(`path has no resolvable ancestor: ${e.message}`);
-        ancestor = up;
+        if (!isAbsent(ancestor, e)) throw unresolvable();
       }
     }
-    resolved = join(ancestorCanonical, relative(ancestor, joined));
+    const segments = [];
+    for (const seg of joined.slice(ancestor.length).split(sep)) {
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") {
+        throw new Error(`path does not resolve: ${joined} (\`..\` below a missing directory)`);
+      }
+      segments.push(seg);
+    }
+    resolved = segments.length
+      ? (base.endsWith(sep) ? base : base + sep) + segments.join(sep)
+      : base;
   }
 
   if (resolved !== cwdCanonical && !resolved.startsWith(cwdCanonical + sep)) {
     throw new Error(`path escapes cwd (resolved: ${resolved}, cwd: ${cwdCanonical})`);
   }
   return resolved;
+}
+
+/**
+ * `true` when `p` failed to resolve only because nothing exists there: not a
+ * dangling or looping symlink, not an unreadable directory. Mirrors Rust's
+ * `is_absent` in `src-tauri/src/git/cmd.rs`.
+ */
+function isAbsent(p, err) {
+  if (err?.code !== "ENOENT") return false;
+  try {
+    lstatSync(p);
+    return false;
+  } catch (e) {
+    return e.code === "ENOENT";
+  }
+}
+
+/**
+ * `path` as a clean repo-relative path, `/`-separated (no `./`, an absolute
+ * path inside the repo made relative), falling back to the guard's resolved
+ * path when it cannot be cleaned lexically. Mirrors Rust's
+ * `repo_relative_path` in `commands/read.rs`, so both backends hand git the
+ * same argument and produce the same diff header.
+ */
+function repoRelativePath(cwd, root, path, guarded) {
+  let rel = null;
+  if (isAbsolute(path)) {
+    for (const base of [cwd, root]) {
+      const prefix = base.endsWith(sep) ? base : base + sep;
+      if (path === base) { rel = ""; break; }
+      if (path.startsWith(prefix)) { rel = path.slice(prefix.length); break; }
+    }
+  } else {
+    rel = path;
+  }
+  let parts = [];
+  if (rel !== null) {
+    for (const seg of rel.split(sep)) {
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") { parts = []; break; }
+      parts.push(seg);
+    }
+  }
+  if (!parts.length) parts = relative(root, guarded).split(sep).filter(Boolean);
+  return parts.join("/");
 }
 
 /** Resolve the full path to a CLI binary, checking Homebrew paths on macOS. */
@@ -1895,7 +1964,16 @@ async function handleRequest(req, res) {
       let fullPath;
       try { fullPath = safeRepoPath(cwd, path); }
       catch (e) { return jsonResponse(req, res, { error: e.message }, 400); }
-      writeFileSync(fullPath, content, "utf-8");
+      // The guard resolves a symlink that leads somewhere real, so `fullPath`
+      // is only still a symlink when it dangles (or loops). Writing through it
+      // would create its target, wherever that is. Mirrors Rust's write_file.
+      let isLink = false;
+      try { isLink = lstatSync(fullPath).isSymbolicLink(); } catch { /* absent */ }
+      if (isLink) {
+        return jsonResponse(req, res, { error: `refusing to write through a symlink that does not resolve: ${path}` }, 400);
+      }
+      try { writeFileSync(fullPath, content, "utf-8"); }
+      catch (e) { return jsonResponse(req, res, { error: `Failed to write ${path}: ${e.message}` }, 500); }
       return jsonResponse(req, res, { ok: true });
     }
 
@@ -2480,8 +2558,12 @@ async function handleRequest(req, res) {
       // Every branch below hands `path` to git, and the untracked fallback
       // runs `git diff --no-index`, which reads whatever file it names. Refuse
       // anything resolving outside the repo first, like Rust's `git_diff`.
+      let gitPath;
       try {
-        safeRepoPath(cwd, path);
+        const guarded = safeRepoPath(cwd, path);
+        const root = realpathSync.native(cwd);
+        if (guarded === root) throw new Error("path must not be the repository root");
+        gitPath = repoRelativePath(cwd, root, path, guarded);
       } catch (e) {
         return jsonResponse(req, res, { error: e.message }, 400);
       }
@@ -2514,7 +2596,7 @@ async function handleRequest(req, res) {
           });
         }
 
-        const args = staged ? ["diff", "--cached", "--", path] : ["diff", "--", path];
+        const args = staged ? ["diff", "--cached", "--", gitPath] : ["diff", "--", gitPath];
         let stdout;
         let truncatedFromBytes;
         try {
@@ -2531,9 +2613,9 @@ async function handleRequest(req, res) {
         // renders the entire file as an addition instead of showing no
         // unstaged change. Drift found by tests/parity/git-diff (issue #183).
         if (!stdout.trim() && !staged) {
-          const absFile = join(resolvedCwd, path);
+          const absFile = join(resolvedCwd, gitPath);
           const tracked =
-            spawnSync(GIT, ["ls-files", "--error-unmatch", "--", path], {
+            spawnSync(GIT, ["ls-files", "--error-unmatch", "--", gitPath], {
               cwd: resolvedCwd,
               encoding: "utf-8",
             }).status === 0;
@@ -2542,7 +2624,7 @@ async function handleRequest(req, res) {
             // then truncate the same way as the plain diff. The repo-relative
             // path (as in Rust) keeps the header, hence the byte count and the
             // cut, identical on both sides.
-            const r = spawnSync(GIT, ["diff", "--no-index", "--", "/dev/null", path], {
+            const r = spawnSync(GIT, ["diff", "--no-index", "--", "/dev/null", gitPath], {
               cwd: resolvedCwd, maxBuffer: Infinity,
             });
             ({ text: stdout, truncatedFromBytes } = truncateDiffOutput(r.stdout || Buffer.alloc(0)));

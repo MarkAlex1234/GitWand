@@ -31,6 +31,7 @@
 
 use crate::git::*;
 use crate::types::*;
+use std::path::{Component, Path};
 
 // ─── Git status ───────────────────────────────────────────
 //
@@ -767,7 +768,13 @@ pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<
     // anything that resolves outside the repo (`..`, absolute, or through a
     // symlink) before spawning anything. git keeps getting the repo-relative
     // path; the resolved one is only the proof that it stays inside.
-    safe_repo_path(&cwd, &path)?;
+    let guarded = safe_repo_path(&cwd, &path)?;
+    let root = Path::new(&cwd)
+        .canonicalize()
+        .map_err(|e| format!("cwd does not resolve: {}", e))?;
+    if guarded == root {
+        return Err("path must not be the repository root".to_string());
+    }
     let _repo = repo_lock::read(&cwd);
     // A trailing slash means the sidebar handed us an untracked *directory*
     // entry, which has no diff. List what is inside instead so the UI can
@@ -780,10 +787,14 @@ pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<
         return git_diff_directory(&cwd, path);
     }
 
+    // What git (and libgit2, which panics on anything else) is handed: a
+    // clean repo-relative path. The response still echoes `path` as given.
+    let git_path = repo_relative_path(&cwd, &root, &path, &guarded);
+
     // libgit2 fast path (v3.10.0): avoids a git subprocess on the hottest read
     // path in the app. Any error falls back to the CLI, which stays the
     // reference implementation for the parity harness.
-    let raw: Vec<u8> = match libgit2_diff_patch(&cwd, &path, staged) {
+    let raw: Vec<u8> = match libgit2_diff_patch(&cwd, &git_path, staged) {
         Ok(patch) => patch.into_bytes(),
         Err(e) => {
             eprintln!("[git_diff] libgit2 fast path failed ({e}); falling back to CLI");
@@ -793,7 +804,7 @@ pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<
             } else {
                 cmd.arg("diff");
             }
-            cmd.arg("--").arg(&path).current_dir(&cwd);
+            cmd.arg("--").arg(&git_path).current_dir(&cwd);
             cmd.output()
                 .map_err(|e| format!("Failed to run git diff: {}", e))?
                 .stdout
@@ -818,7 +829,7 @@ pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<
         && hunks.is_empty()
         && truncated_from_bytes.is_none()
         && !git_cmd()
-            .args(["ls-files", "--error-unmatch", "--", &path])
+            .args(["ls-files", "--error-unmatch", "--", &git_path])
             .current_dir(&cwd)
             .output()
             .map(|o| o.status.success())
@@ -826,7 +837,7 @@ pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<
 
     if is_untracked {
         if let Ok(fb) = git_cmd()
-            .args(["diff", "--no-index", "--", "/dev/null", &path])
+            .args(["diff", "--no-index", "--", "/dev/null", &git_path])
             .current_dir(&cwd)
             .output()
         {
@@ -853,6 +864,45 @@ pub(crate) async fn git_diff(cwd: String, path: String, staged: bool) -> Result<
         new_files: None,
         nested_repo: None,
     })
+}
+
+/// `path` as a clean repo-relative path, `/`-separated: no `./`, and an
+/// absolute path inside the repo made relative. libgit2 panics on either form
+/// (`path_to_repo_path(..).unwrap()` in git2's index lookup).
+///
+/// `guarded` is what `safe_repo_path` resolved `path` to. It is only used when
+/// `path` cannot be cleaned lexically (an absolute path under another spelling
+/// of the repo root, or a `..` component), because it has symlinks resolved:
+/// for a symlink as last component it names the target, not the link.
+/// Either way the `--no-index` fallback reads the file the guard checked.
+fn repo_relative_path(cwd: &str, root: &Path, path: &str, guarded: &Path) -> String {
+    let p = Path::new(path);
+    let rel = if p.is_absolute() {
+        p.strip_prefix(cwd).or_else(|_| p.strip_prefix(root)).ok()
+    } else {
+        Some(p)
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(rel) = rel {
+        for c in rel.components() {
+            match c {
+                Component::Normal(n) => parts.push(n.to_string_lossy().into_owned()),
+                Component::CurDir => {}
+                _ => {
+                    parts.clear();
+                    break;
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        let fallback = guarded.strip_prefix(root).unwrap_or(guarded);
+        parts = fallback
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+    }
+    parts.join("/")
 }
 
 /// `git_diff` for a directory path: the untracked files inside it.
@@ -3542,6 +3592,42 @@ mod pathspec_tests {
         let d = diff(&repo, "newdir/", false).expect("directory diff");
         assert_eq!(d.is_directory, Some(true));
         assert_eq!(d.new_files, Some(vec!["newdir/a.txt".to_string()]));
+    }
+
+    /// `./x` and an absolute path inside the repo pass the guard; they used to
+    /// reach libgit2 as-is and panic inside git2 ("should not start with
+    /// '.'" / "should be relative").
+    #[test]
+    fn git_diff_accepts_dot_slash_and_absolute_forms_of_a_repo_path() {
+        let repo = committed_repo();
+        repo.write("root.txt", "ROOT\n");
+        let abs = repo.path.join("root.txt");
+        let hunks = |d: GitDiff| serde_json::to_value(d.hunks).unwrap();
+        let want = hunks(diff(&repo, "root.txt", false).expect("plain"));
+        assert_eq!(want.as_array().unwrap().len(), 1);
+        for p in ["./root.txt", abs.to_str().unwrap()] {
+            let d = diff(&repo, p, false).unwrap_or_else(|e| panic!("{p}: {e}"));
+            assert_eq!(d.path, p, "the response echoes the path as given");
+            assert_eq!(hunks(d), want, "{p}");
+        }
+        repo.git(&["add", "--", "root.txt"]);
+        let want = hunks(diff(&repo, "root.txt", true).expect("staged"));
+        assert_eq!(
+            hunks(diff(&repo, "./root.txt", true).expect("./ staged")),
+            want
+        );
+    }
+
+    #[test]
+    fn git_diff_refuses_the_repository_root() {
+        let repo = committed_repo();
+        repo.write("root.txt", "ROOT\n");
+        for p in [".", "./", repo.cwd().as_str()] {
+            match diff(&repo, p, false) {
+                Ok(_) => panic!("{p}: the repository root is not a file to diff"),
+                Err(err) => assert_eq!(err, "path must not be the repository root", "{p}"),
+            }
+        }
     }
 
     #[test]
