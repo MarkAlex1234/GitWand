@@ -5,6 +5,40 @@ description: Release history for GitWand — the native Git client with AI confl
 
 # Changelog
 
+## v3.11.2 — October 2026
+
+### The File Explorer becomes a file browser
+
+The panel behind the dock's Files tile already let you open, edit and blame a file. It now lets you find one. The tree lists your working tree the way Finder or Explorer would, and every changed file carries a badge. So does every folder above it, even one you never opened, so a change three levels down is visible from the top. The badges are landmarks: the tree is for getting around the whole repository, not just its diff.
+
+It also opens from the command palette ("Toggle File Explorer") and, on macOS, from the View menu. The separate Browse view that briefly existed during development is gone. There is one file browser, and it can edit.
+
+### One folder at a time, and fast
+
+Before, the panel loaded the whole repository once, up to 20,000 entries, and never refreshed. Now each folder is listed the first time you open it, capped at 5,000 entries, and the tree says so when it hits the cap. Ignored files are classified in process with libgit2 instead of asking git about each one. On a `microsoft/vscode` checkout, a 6,000-file folder lists in 66 ms, where `git check-ignore` takes 1.6 s. A file you force-added is not shown as ignored. Ignored files stay hidden until you tick "Show ignored", and then they appear greyed out.
+
+The Live Repo watcher keeps the tree current. When a file appears or disappears, only the folders that changed are listed again.
+
+### Built for the keyboard
+
+The tree has a single tab stop and behaves like a tree. The arrow keys expand, collapse, descend and climb, Home and End jump to the ends, and typing a name jumps to it. Enter opens a file in the preview tab, a double click pins it, and ⇧F10 opens the context menu. That menu has Open in editor, Copy path and Reveal in Finder (or Explorer, or your file manager) on a file, and Scope here on a folder. The tree is virtualized, so a huge folder scrolls as smoothly as a small one.
+
+### Diff or file, per tab
+
+A changed file opens on its inline diff, and a Diff | File toggle switches to the editor and back. When a file is both staged and modified, a Working tree | Index switch picks which change you see. The diff always shows what is on disk, so while a tab has unsaved edits, Diff waits and says "Save to see the diff". A conflicted file offers to open the merge editor, and a file deleted on disk says so instead of pretending.
+
+"Scope here" narrows the whole app to a folder, and the tree re-roots on it with a "Whole repo" button to go back. If the folder is deleted, the panel falls back to the whole repository and tells you why. Expanded folders, the selection and "Show ignored" are remembered per repository.
+
+### Fixes that rode along
+
+Three diff panels never appeared in the packaged app: the "diff truncated at 5 MB" banner, the untracked-directory panel and the nested-repository panel. The desktop bridge dropped every field except the path and the hunks, while `pnpm dev:web` kept them all. It now passes them through. An untracked file over 5 MB is now cut like any other diff instead of streaming its whole content to the UI. And virtualized lists, such as the inline PR diff, no longer stop growing after their first render.
+
+On Linux, the AppImage now starts for any user. Its launcher used to ship as `0770`, so `firejail --appimage`, which mounts the image as root, got "Permission denied", and so did the AppImage catalog's test. The launcher is now `0755`, and the CI build fails if that ever regresses.
+
+### Paths stay inside the repository
+
+`git_diff` and `write_file` now refuse a path outside the repository, including one that gets out through a symlink. Before, a `../` or an absolute path could make the untracked-file diff render a file from elsewhere on disk, and a write could follow a dangling symlink and create its target. Both now go through the same check, which resolves paths on the filesystem rather than as text and refuses anything below a dangling, looping or unreadable symlink.
+
 ## v3.11.1 — September 2026
 
 ### The model now knows why each side changed the code

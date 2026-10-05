@@ -6,30 +6,16 @@
 
 ## What's Next
 
-_Ordered by priority, last verified 2026-09-25 (v3.11.1 shipped; v3.11.0's remaining lot is v3.11.2). The thread: the measured-accuracy engine re-founds the trust every later auto-apply feature spends, then make the app reactive and fast (Live Repo), close the resolution loop (preview-to-apply, whose confidence threshold is only meaningful **because** of the accuracy work), then workflow & comparison primitives, experimental voice input, and the v4.0 code-intelligence headline. Full renumbering history: `git log -p -- roadmap.md`._
+_Ordered by priority, last verified 2026-10-05 (v3.11.2 shipped). The thread: the measured-accuracy engine re-founds the trust every later auto-apply feature spends, then make the app reactive and fast (Live Repo), close the resolution loop (preview-to-apply, whose confidence threshold is only meaningful **because** of the accuracy work), then workflow & comparison primitives, experimental voice input, and the v4.0 code-intelligence headline. Full renumbering history: `git log -p -- roadmap.md`._
 
 | Version | Codename | Why now |
 |---------|----------|---------|
-| **v3.11.2** | Finder-like folder navigation | A real working-tree folder tree; the substrate `FolderDiffTree` was never meant to be |
 | **v3.12.0** | Stacked Branches | Native stacked PRs, sequenced after v3.11 (leans on preview→apply) |
 | **v3.13.0** | Combined Diffs | Multi-commit, non-contiguous aggregated diff |
 | **v3.14.0** | Voice Input | Experimental — local dictation via embedded Whisper |
 | **v4.0.0** (candidate) | Blast Radius | Code-graph impact before merge — the code-intelligence headline |
 
-_v3.11.1 — History-aware LLM fallback — and v3.11.0 — Merge preview-to-apply — shipped; see [Shipped](#shipped) below and the full detail in [CHANGELOG.md](./CHANGELOG.md)._
-
----
-
-### v3.11.2 — Finder-like folder navigation
-
-A real working-tree folder tree: tree on the left, inline diff on the right,
-keyboard-operable, per-file status badges, reusing v3.11.0's CodeMirror
-integration. The `FolderDiffTree` inherited from v2.21.0 Monorepo Scope is
-diff-only and the wrong substrate, so this is a new surface rather than a
-reskin. It lands right-click "Scope here" on real ground, and gives macOS users
-a Finder-like mode to counter RelaGit and Strand's more rigid UIs.
-
-Delivered in the File Explorer panel rather than as a separate view (decision of 2026-10-02, spec addendum `2026-10-02-finder-converge-on-explorer-design.md`): one file browser, which can also edit.
+_v3.11.2 (Finder-like folder navigation), v3.11.1 (History-aware LLM fallback) and v3.11.0 (Merge preview-to-apply) shipped; see [Shipped](#shipped) below and the full detail in [CHANGELOG.md](./CHANGELOG.md)._
 
 ---
 
@@ -189,6 +175,7 @@ Positioning: neither "yet another Git GUI" nor an IDE. A first-class Git navigat
 
 | Version | Highlights |
 |---------|-----------|
+| **v3.11.2** | **Finder-like folder navigation** — the File Explorer panel becomes the file browser (the separate Browse view is gone): lazy per-folder `list_repo_dir` with in-process libgit2 ignore classification (5 000-entry cap, 66 ms for a 6 000-file folder vs 1.6 s for `git check-ignore`), live re-listing from the Live Repo watcher, a virtualized keyboard-first `role="tree"`, change badges on every folder above a changed file, per-tab Diff \| File with a Working tree \| Index switch, context menu (Copy path, Reveal in Finder/Explorer via `reveal_in_file_manager`, Scope here) · `git_diff`/`write_file` go through a filesystem-resolving `safe_repo_path` · the untracked-file diff gets the 5 MB cap · `getGitDiff` stops dropping the truncation, untracked-directory and nested-repo fields on Tauri · Linux AppImage launcher shipped `0755` (`@tauri-apps/cli` 2.12, CI mode check) |
 | **v3.11.1** | **History-aware LLM fallback** — `llm_proposed` and "Resolve with AI" now tell the model why each side changed the conflicting lines: the commits since the merge base, with their messages, plus range diffs within a token budget (1 500 by default, 200–8 000). Computed locally through an injected `GitRunner`, so `@gitwand/core` stays browser-safe, and collected only for hunks actually sent to a model · an explicit "History unavailable" line instead of a silent gap · a `.gitwandrc` opt-out that wins over the app setting · shown in the LLM trace panel · fixes: `MergeEditor` never received the repo path, which had silently disabled custom automations and resolution-memory apply; saving Settings no longer drops unknown `llmFallback` keys |
 | **v3.11.0** | **Merge preview-to-apply + editable diff** — "Merge and auto-resolve" runs the real operation and re-runs the engine against what git produced, applying what passes the gates and stopping on the residual; a numeric confidence bar (`minConfidenceScore`) ANDed with the label gate across desktop, `.gitwandrc`, CLI and MCP; per-hunk opt-out; CodeMirror 6 in the merge editor and an editable inline diff · **Gitea and Forgejo support** (#193) verified against a live 1.27.3 server · **Forge-side auto-merge** on GitHub, GitLab and Azure, with Bitbucket refusing honestly rather than pretending · **Abort and continue tell the truth** (#197, #202): one `git_operation_action` for merge, cherry-pick, revert and rebase, three outcomes instead of two, confirmation before discarding resolution work, and nothing auto-continues · **A declared Tauri-to-dev-server command registry** with a guard, plus failure parity for 27 write commands — which found and fixed a submodule update that reported success whatever git did, and two routes that 404'd under `dev:web` |
 | **v3.10.0** | **Live Repo** (#178) — a `notify` filesystem watcher replaces the 2s status poll, which becomes a 15s fallback; raw OS events are coalesced into typed `RepoChangeEvent`s over a scoped `tauri::ipc::Channel` (SSE under `dev:web`), one watcher per repo shared by N subscribers, designed as the hook for the v4.0 incremental indexer. libgit2 phase 1 lands on `git_diff` only (see Later (unscheduled) for why `git_blame` did not). `clone`/`fetch` progress moves off the global broadcast onto per-invoke channels, `packages/core` resolution moves into a Comlink Web Worker, and the Today inbox stops being read-only: merge, nudge and a direct jump into the resolver. |

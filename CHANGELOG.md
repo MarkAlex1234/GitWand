@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.2] - 2026-10-05
+
 ### Added
 - **The File Explorer panel becomes a Finder-like file browser.** The panel behind the dock's Files tile keeps its tabs, editing and blame, and gains what a file browser needs. It also opens from the command palette ("Toggle File Explorer") and, on macOS, the View menu. Badges are landmarks, not the point. Every changed file has one, and so does every folder above it, including folders that were never opened.
   - **Lazy, one folder at a time.** A new `list_repo_dir` command lists a single directory when it is first expanded, capped at 5,000 entries, after which the tree says only the first 5,000 are shown. Ignored entries are classified in process with libgit2: a path is ignored when an ignore rule matches it and the index does not track it, so a force-added file is not shown as ignored. Measured on a `microsoft/vscode` checkout, a 6,000-file directory lists in 66 ms, where `git check-ignore` takes 1.6 s. Ignored files are hidden by default, and "Show ignored" shows them greyed out.
@@ -1572,7 +1574,8 @@ Design-system foundations — the app header and every overlay now ride on a sha
 - CI pipeline via GitHub Actions (Node 18, 20, 22)
 - 28 tests covering all patterns + real-world scenarios (package.json, Laravel routes, Vue SFC, CSS, .env files)
 
-[Unreleased]: https://github.com/devlint/GitWand/compare/v3.10.1...HEAD
+[Unreleased]: https://github.com/devlint/GitWand/compare/v3.11.2...HEAD
+[3.11.2]: https://github.com/devlint/GitWand/compare/v3.11.1...v3.11.2
 [3.11.1]: https://github.com/devlint/GitWand/compare/v3.11.0...v3.11.1
 [3.11.0]: https://github.com/devlint/GitWand/compare/v3.10.1...v3.11.0
 [3.10.1]: https://github.com/devlint/GitWand/compare/v3.10.0...v3.10.1
