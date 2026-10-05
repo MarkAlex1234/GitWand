@@ -1149,12 +1149,17 @@ mod tests {
         let root = temp_watch_root("reload");
         // Two subscriptions from the document that is about to be replaced,
         // plus one from a second window on the same repo.
-        let stale_a = register_subscription(&root, "main", Channel::new(|_| Ok(())));
-        let stale_b = register_subscription(&root, "main", Channel::new(|_| Ok(())));
-        let other = register_subscription(&root, "second", Channel::new(|_| Ok(())));
+        //
+        // The labels are this test's own. The subscriber registry is
+        // process-wide and tests run in parallel, so reaping a label another
+        // test also uses ("main") would drop that test's subscriptions too:
+        // `broadcast_keeps_a_live_subscriber` failed about 1 run in 40 that way.
+        let stale_a = register_subscription(&root, "reload-test-main", Channel::new(|_| Ok(())));
+        let stale_b = register_subscription(&root, "reload-test-main", Channel::new(|_| Ok(())));
+        let other = register_subscription(&root, "reload-test-second", Channel::new(|_| Ok(())));
         assert_eq!(lock_watches().get(&root).unwrap().subscriber_count, 3);
 
-        stop_all_for_webview("main");
+        stop_all_for_webview("reload-test-main");
 
         assert!(!lock_subscribers().contains_key(&stale_a));
         assert!(!lock_subscribers().contains_key(&stale_b));
