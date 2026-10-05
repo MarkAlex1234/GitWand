@@ -8,11 +8,13 @@ on:
   pull_request:
     paths:
       - "apps/desktop/**"
+      - "packages/core/**"
       - ".github/workflows/perf.yml"
   push:
     branches: [main]
     paths:
       - "apps/desktop/**"
+      - "packages/core/**"
       - ".github/workflows/perf.yml"
 
 jobs:
