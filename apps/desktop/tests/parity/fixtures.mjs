@@ -17,7 +17,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, realpathSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, realpathSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -447,5 +447,38 @@ export function fixtureApplyFromPreview() {
   commitFile(cwd, "spacing.ts", "const   a = 1;\n", "main respaces", 4);
   commitFile(cwd, "hard.ts", "export const mode = \"main\";\n", "main rewrites", 5);
 
+  return cwd;
+}
+
+// ─── Files view fixture (v3.11.2) ──────────────────────────────────────────
+
+/**
+ * Every `list_repo_dir` classification the Files view shows: tracked,
+ * untracked, an ignored file and directory, an ignored directory holding a
+ * tracked file, a tracked `*.log` under a `*.log` rule, mixed-case names,
+ * spaces and non-ASCII (in the repo path itself too), and, outside Windows, a
+ * symlink leaving the repo. Global excludes are neutralised so the
+ * developer's own ~/.gitignore cannot change the answer on either side.
+ */
+export function fixtureListRepoDir() {
+  const cwd = mkTempRepo("gw list dir é-");
+  execFileSync("git", ["-C", cwd, "config", "core.excludesFile", join(cwd, ".git", "no-global-excludes")]);
+  commitFile(cwd, "src/main.ts", "export {};\n", "add src", 0);
+  commitFile(cwd, "Readme.md", "# hi\n", "add readme", 1);
+  // Both committed before the rules that would ignore them.
+  commitFile(cwd, "build/keep.txt", "keep\n", "add build/keep.txt", 2);
+  commitFile(cwd, "forced.log", "forced\n", "add forced.log", 3);
+  commitFile(cwd, "docs/guide one.md", "guide\n", "add guide", 4);
+  commitFile(cwd, ".gitignore", "build/\nnode_modules/\n*.log\n", "add ignore rules", 5);
+  // Untracked, not ignored.
+  writeFileSync(join(cwd, "alpha.txt"), "a\n");
+  writeFileSync(join(cwd, "Zeta.txt"), "z\n");
+  writeFileSync(join(cwd, "café.txt"), "c\n");
+  // Ignored.
+  writeFileSync(join(cwd, "debug.log"), "d\n");
+  mkdirSync(join(cwd, "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(cwd, "node_modules", "pkg", "index.js"), "x\n");
+  writeFileSync(join(cwd, "build", "out.bin"), "o\n");
+  if (process.platform !== "win32") symlinkSync(tmpdir(), join(cwd, "link-out"));
   return cwd;
 }

@@ -33,7 +33,7 @@ export type DockEntryId = "launchpad" | "dashboard" | "prs" | "graph" | "changes
 export const DEFAULT_DOCK_ORDER: DockEntryId[] = ["launchpad", "dashboard", "prs", "graph", "changes"];
 
 /**
- * Normalise a stored dock order so all five entries are present exactly once:
+ * Normalise a stored dock order so every entry is present exactly once:
  * keep the known/persisted order, then append any missing entries in default
  * order. Shared by AppDock (render order) and SettingsPanel (reorder list).
  */

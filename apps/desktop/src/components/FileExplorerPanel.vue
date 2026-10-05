@@ -1,12 +1,19 @@
 <script setup lang="ts">
-import { computed, ref, toRef, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
+import { computed, reactive, ref, toRef, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
+import FileTreePane from "./FileTreePane.vue";
+import DiffViewer from "./DiffViewer.vue";
 import { useFileExplorer, resolveFileExplorerShortcut, type FileTab } from "../composables/useFileExplorer";
-import { useRepoFileTree } from "../composables/useRepoFileTree";
+import { useLazyRepoTree, type TreeWatcher } from "../composables/useLazyRepoTree";
+import { useTreeScopeRoot } from "../composables/useTreeScopeRoot";
+import { formatBytes, useFilePreview, type PreviewBody, type PreviewTarget } from "../composables/useFilePreview";
+import { canShowDiff, initialTabView, isDiffable, visibleTabView, type TabView } from "../composables/explorerTabView";
+import type { DiffMode } from "../utils/diffMode";
 import { useSettings } from "../composables/useSettings";
 import { useI18n } from "../composables/useI18n";
+import { useLogs } from "../composables/useLogs";
 import { useDraggableResizable } from "../composables/useDraggableResizable";
 import type { RepoFileEntry } from "../composables/useGitRepo";
-import { getGitBlame } from "../utils/backend";
+import { clipboardWriteText, getGitBlame, getGitDiff, listRepoDir, readFileAtRevision, revealInFileManager } from "../utils/backend";
 import { buildBlameModel, type BlameGutterEntry } from "../composables/useBlameGutter";
 import { useCodeMirror } from "../composables/useCodeMirror";
 import { peekCodeMirror } from "../utils/codemirrorLibs";
@@ -15,22 +22,49 @@ import type { EditorState as EditorStateType, Extension } from "@codemirror/stat
 const props = defineProps<{
   repoPath: string;
   changedFiles: RepoFileEntry[];
+  /** v3.11.2 — live refresh; optional so existing mounts keep working. */
+  watcher?: TreeWatcher | null;
 }>();
 
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "request-close-tab", tabId: number): void;
+  /** v3.11.2 — context menu "Open in editor": App opens the configured external editor. */
+  (e: "open-in-editor", path: string): void;
+  /** v3.11.2 — the conflicted banner: App opens the merge editor in the Changes view. */
+  (e: "open-merge-editor", path: string): void;
+  /** v3.11.2 — DiffViewer's history button: App opens the file history in the Changes view. */
+  (e: "open-file-history", path: string): void;
 }>();
 
 const { t } = useI18n();
+const { pushLog } = useLogs();
 const { settings, saveSettings } = useSettings();
 const explorer = useFileExplorer();
 
 const repoPathRef = toRef(props, "repoPath");
 const changedFilesRef = toRef(props, "changedFiles");
-const tree = useRepoFileTree(repoPathRef, changedFilesRef);
+// Lazy, live tree (v3.11.2), rooted at the workspace scope when one is
+// active. The panel lives in a KeepAlive and is not remounted on a repo
+// switch: the tree and the scope check both follow `repoPath` instead.
+const scope = useTreeScopeRoot(repoPathRef);
+const treePane = ref<InstanceType<typeof FileTreePane> | null>(null);
 
-watch(repoPathRef, () => tree.refresh(), { immediate: true });
+/** "Whole repo" removes its own button, so focus would fall to the body. */
+async function onWholeRepo(): Promise<void> {
+  await scope.wholeRepo();
+  await nextTick();
+  treePane.value?.focus();
+}
+const tree = useLazyRepoTree({
+  repoPath: repoPathRef,
+  root: scope.root,
+  repoFiles: changedFilesRef,
+  listDir: (dir, includeIgnored) => listRepoDir(props.repoPath, dir, includeIgnored),
+  watcher: props.watcher ?? null,
+  onRootError: () => void scope.onRootError(),
+});
+const repoName = computed(() => props.repoPath.split(/[\\/]/).filter(Boolean).pop() ?? props.repoPath);
 
 const tabs = computed(() => explorer.tabsFor(props.repoPath));
 const activeId = computed(() => explorer.activeTabId(props.repoPath));
@@ -94,13 +128,35 @@ const panelStyle = computed(() => {
   };
 });
 
-async function onFileClick(path: string) {
-  await explorer.openTab(props.repoPath, props.repoPath, path, false);
+/** A click or Enter opens the preview tab; a double click pins it (FileTreePane's `activate`). */
+async function onActivate(path: string, pinned: boolean) {
+  tree.selected.value = path;
+  await explorer.openTab(props.repoPath, props.repoPath, path, pinned);
 }
 
-async function onFileDblClick(path: string) {
-  await explorer.openTab(props.repoPath, props.repoPath, path, true);
+async function onCopyPath(path: string): Promise<void> {
+  try {
+    await clipboardWriteText(path);
+  } catch (err) {
+    pushLog("error", t("filesView.copyPathFailed", path, err instanceof Error ? err.message : String(err)));
+  }
 }
+
+async function onReveal(path: string): Promise<void> {
+  try {
+    await revealInFileManager(props.repoPath, path);
+  } catch (err) {
+    pushLog("error", t("filesView.revealFailed", path, err instanceof Error ? err.message : String(err)));
+  }
+}
+
+// The tree's highlight follows the active tab, however it became active.
+watch(
+  () => activeTab.value?.path,
+  (path) => {
+    if (path) tree.selected.value = path;
+  },
+);
 
 function onTabClick(tabId: number) {
   explorer.setActive(props.repoPath, tabId);
@@ -329,15 +385,153 @@ function toggleLock() {
 
 function onUndo() {
   const libs = peekCodeMirror();
-  if (editLocked.value || !cm.view.value || !libs) return;
+  if (editLocked.value || editorPending.value || !cm.view.value || !libs) return;
   libs.undo(cm.view.value); // dispatches internally; the existing updateListener
   // (see updateListenerFor) picks up the resulting docChanged transaction
   // and syncs it into useFileExplorer's tab.content, same as any keystroke.
 }
 
 function onToolbarSave() {
-  if (!activeTab.value || activeTab.value.binary) return;
+  if (!activeTab.value || activeTab.value.binary || editorPending.value) return;
   explorer.saveTab(props.repoPath, props.repoPath, activeTab.value.id);
+}
+
+// ── Diff | File (v3.11.2) ──
+// A tab on a changed file opens on its inline diff; the toolbar toggle
+// switches to the editor and back. What a tab shows is
+// `resolveTabView(stored side, status)`. The side is stored the first time the
+// panel shows the tab, so a file that becomes changed while open does not
+// flip its tab. The diff reads the disk, which is why a dirty buffer cannot
+// switch to it (canShowDiff).
+// Keyed by repo + tab id: the panel stays mounted across a repo switch, and a
+// tab's side must survive leaving and coming back to its repo.
+const viewKey = (id: number) => `${props.repoPath}::${id}`;
+const tabViews = reactive(new Map<string, TabView>());
+// Right after a repo switch `changedFiles` still holds the previous repo's
+// status until the new one loads: deciding a tab's first side then would
+// record "file" for a file changed only in the new repo. Until the status
+// arrives, no side is recorded and the tab resolves from the live status.
+const statusPending = ref(false);
+watch(repoPathRef, () => {
+  statusPending.value = true;
+});
+watch(changedFilesRef, () => {
+  statusPending.value = false;
+});
+const activeStatus = computed(() =>
+  activeTab.value ? (tree.statusByPath.value.get(activeTab.value.path) ?? null) : null,
+);
+const activeDiffable = computed(() => isDiffable(activeStatus.value));
+const showDiff = computed(
+  () =>
+    activeTab.value !== null &&
+    visibleTabView(tabViews.get(viewKey(activeTab.value.id)), activeStatus.value, explorer.isDirty(activeTab.value)) === "diff",
+);
+const diffBlocked = computed(
+  () => activeTab.value !== null && !canShowDiff(activeStatus.value, explorer.isDirty(activeTab.value)),
+);
+
+const previewTarget = computed<PreviewTarget | null>(() => {
+  const tab = activeTab.value;
+  const status = activeStatus.value;
+  if (!tab || !status || !showDiff.value) return null;
+  // `size` lets planPreview refuse a huge untracked file before diffing it at
+  // all. The tree row carries it; a file whose folder is not loaded has no
+  // row, and keeps 0 — then git_diff's own 5 MB cap (plain and untracked
+  // --no-index output alike) still bounds what crosses IPC.
+  const row = tree.rows.value.find((r) => r.kind === "file" && r.path === tab.path);
+  const size = row?.kind === "file" ? row.size : 0;
+  return { kind: "file", path: tab.path, size, symlink: false, status };
+});
+// Request-id race guard and stale-while-revalidate watcher reload come with
+// useFilePreview: a response for an earlier tab, side or repo is dropped.
+const preview = useFilePreview({
+  cwd: repoPathRef,
+  target: previewTarget,
+  loaders: {
+    readFile: (cwd, path) => readFileAtRevision(cwd, "", path),
+    getDiff: getGitDiff,
+  },
+  watcher: props.watcher ?? null,
+});
+const diffBody = preview.body;
+const diffSide = preview.side;
+const canSwitchSide = computed(() => preview.plan.value?.kind === "diff" && preview.plan.value.canSwitch);
+/** DiffViewer's own inline / side-by-side toggle; the panel starts inline. */
+const diffMode = ref<DiffMode>("inline");
+
+// Record a tab's side the first time it is shown. When its file stops having
+// a diff to show (committed, discarded, deleted on disk), store File, so the
+// next change does not flip the tab back to the diff under the cursor.
+watch(
+  () => [activeTab.value?.id ?? null, props.repoPath, statusPending.value, isDiffable(activeStatus.value)] as const,
+  ([id, , pending, diffable]) => {
+    if (id === null || pending) return;
+    const k = viewKey(id);
+    const stored = tabViews.get(k);
+    if (stored === undefined) tabViews.set(k, initialTabView(activeStatus.value));
+    else if (stored === "diff" && !diffable) void setView("file");
+  },
+  { immediate: true },
+);
+
+// Latest side request per tab: a File request whose read is still pending is
+// void once the user asked for either side again (Diff then File, say).
+const viewRequests = new Map<string, number>();
+let viewRequestSeq = 0;
+// Per tab (viewKey), the number of leaving-Diff re-reads in flight. While one
+// is pending for the active tab, its buffer may predate the disk file: the
+// editor stays hidden and Lock/Edit, Undo, Blame, Save and ⌘S are off.
+const reloadPending = reactive(new Map<string, number>());
+const editorPending = computed(() => activeTab.value !== null && reloadPending.has(viewKey(activeTab.value.id)));
+
+async function setView(view: TabView): Promise<void> {
+  const tab = activeTab.value;
+  if (!tab) return;
+  const repo = props.repoPath;
+  const k = viewKey(tab.id);
+  const request = ++viewRequestSeq;
+  viewRequests.set(k, request);
+  if (view === "diff") {
+    if (canShowDiff(activeStatus.value, explorer.isDirty(tab))) tabViews.set(k, "diff");
+    return;
+  }
+  if (tabViews.get(k) !== "diff") {
+    tabViews.set(k, "file");
+    if (props.repoPath === repo && activeTab.value?.id === tab.id) await mountTab(tab);
+    return;
+  }
+  // Leaving Diff. The diff showed the file on disk; the buffer dates from when
+  // the tab opened. Keep the diff on screen while a clean buffer is re-read:
+  // revealing the editor first would let an edit (or Undo) land on the old
+  // text, make the reload decline as dirty, and a save would then overwrite
+  // the newer disk file. The cached editor state and blame built from the old
+  // text are dropped for THAT tab, whichever is active by the time the read
+  // lands. The diff is not always there to cover the read: when the watcher
+  // falls back because the file has no diff any more, the tab already resolves
+  // to File. `reloadPending` hides the editor and disables its actions until
+  // the read lands, whichever way we got here.
+  reloadPending.set(k, (reloadPending.get(k) ?? 0) + 1);
+  try {
+    if (await explorer.reloadTab(repo, repo, tab.id)) {
+      docStates.delete(tab.id);
+      blameModels.delete(tab.id);
+    }
+    // Do not override a side the user chose, or a repo switched, in the meantime.
+    if (props.repoPath !== repo || tabViews.get(k) !== "diff" || viewRequests.get(k) !== request) return;
+    tabViews.set(k, "file");
+    if (activeTab.value?.id === tab.id) await mountTab(tab);
+  } finally {
+    const left = (reloadPending.get(k) ?? 1) - 1;
+    if (left > 0) reloadPending.set(k, left);
+    else reloadPending.delete(k);
+  }
+}
+
+function diffPlaceholder(body: Extract<PreviewBody, { kind: "placeholder" }>): string {
+  return body.reason === "too-large"
+    ? t("filesView.preview.tooLarge", formatBytes(body.size))
+    : t("filesView.preview.noTextDiff");
 }
 
 watch(activeTab, (tab) => {
@@ -356,6 +550,16 @@ watch(
   },
 );
 
+// A side is dropped only when its tab is closed in its own repo: ids are
+// compared within one repoPath, never across a repo switch.
+watch(
+  () => [props.repoPath, tabs.value.map((t) => t.id)] as const,
+  ([repo, ids], [oldRepo, oldIds]) => {
+    if (repo !== oldRepo) return;
+    for (const id of oldIds) if (!ids.includes(id)) tabViews.delete(`${repo}::${id}`);
+  },
+);
+
 onBeforeUnmount(() => {
   cm.destroy();
 });
@@ -365,7 +569,7 @@ function onKeyDown(e: KeyboardEvent) {
   if (!shortcut || !activeTab.value) return;
   if (shortcut === "save") {
     e.preventDefault();
-    if (!activeTab.value.binary) explorer.saveTab(props.repoPath, props.repoPath, activeTab.value.id);
+    if (!activeTab.value.binary && !editorPending.value) explorer.saveTab(props.repoPath, props.repoPath, activeTab.value.id);
   } else if (shortcut === "close") {
     e.preventDefault();
     onTabClose(activeTab.value.id);
@@ -393,6 +597,7 @@ function onKeyDown(e: KeyboardEvent) {
         <button
           class="fe__action-btn"
           :class="{ 'fe__action-btn--active': !editLocked }"
+          :disabled="showDiff || editorPending"
           :title="editLocked ? t('files.toolbarEdit') : t('files.toolbarLock')"
           @click="toggleLock"
         >
@@ -408,7 +613,7 @@ function onKeyDown(e: KeyboardEvent) {
         </button>
         <button
           class="fe__action-btn"
-          :disabled="!activeTab || activeTab.binary || !explorer.isDirty(activeTab)"
+          :disabled="!activeTab || activeTab.binary || !explorer.isDirty(activeTab) || editorPending"
           :title="t('files.toolbarSave')"
           @click="onToolbarSave"
         >
@@ -420,7 +625,7 @@ function onKeyDown(e: KeyboardEvent) {
           <span>{{ t("files.toolbarSave") }}</span>
         </button>
         <span class="fe__header-divider" aria-hidden="true" />
-        <button class="fe__action-btn" :disabled="editLocked" :title="t('files.toolbarUndo')" @click="onUndo">
+        <button class="fe__action-btn" :disabled="editLocked || showDiff || editorPending" :title="t('files.toolbarUndo')" @click="onUndo">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M3 7v6h6"/>
             <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>
@@ -430,7 +635,7 @@ function onKeyDown(e: KeyboardEvent) {
         <button
           class="fe__action-btn"
           :class="{ 'fe__action-btn--active': blameEnabled }"
-          :disabled="!activeTab || activeTab.binary || explorer.isDirty(activeTab)"
+          :disabled="!activeTab || activeTab.binary || explorer.isDirty(activeTab) || showDiff || editorPending"
           :title="t('files.toolbarBlame')"
           @click="toggleBlame"
         >
@@ -441,11 +646,45 @@ function onKeyDown(e: KeyboardEvent) {
           </svg>
           <span>{{ t("files.toolbarBlame") }}</span>
         </button>
+        <template v-if="activeTab && activeDiffable">
+          <span class="fe__header-divider" aria-hidden="true" />
+          <div class="fe__seg" role="radiogroup" :aria-label="t('filesView.viewLabel')">
+            <button
+              type="button"
+              role="radio"
+              class="fe__seg-btn"
+              :aria-checked="showDiff"
+              :aria-disabled="diffBlocked ? 'true' : undefined"
+              :title="diffBlocked ? t('filesView.diffNeedsSave') : undefined"
+              @click="setView('diff')"
+            >{{ t('filesView.viewDiff') }}</button>
+            <button
+              type="button"
+              role="radio"
+              class="fe__seg-btn"
+              :aria-checked="!showDiff"
+              @click="setView('file')"
+            >{{ t('filesView.viewFile') }}</button>
+          </div>
+          <div v-if="showDiff && canSwitchSide" class="fe__seg" role="radiogroup" :aria-label="t('filesView.preview.sideLabel')">
+            <button
+              type="button"
+              role="radio"
+              class="fe__seg-btn"
+              :aria-checked="diffSide === 'worktree'"
+              @click="diffSide = 'worktree'"
+            >{{ t('filesView.preview.sideWorktree') }}</button>
+            <button
+              type="button"
+              role="radio"
+              class="fe__seg-btn"
+              :aria-checked="diffSide === 'index'"
+              @click="diffSide = 'index'"
+            >{{ t('filesView.preview.sideIndex') }}</button>
+          </div>
+        </template>
       </div>
       <div class="fe__header-spacer" />
-      <button v-if="tree.truncated.value" class="fe__truncated" :title="t('files.truncatedTooltip')">
-        {{ t("files.truncatedBadge") }}
-      </button>
       <button
         class="fe__full"
         :title="fullscreen ? t('files.exitFullscreen') : t('files.fullscreen')"
@@ -465,44 +704,33 @@ function onKeyDown(e: KeyboardEvent) {
     </div>
 
     <div class="fe__body">
-      <div class="fe__tree" role="tree">
-        <div
-          v-for="row in tree.rows.value"
-          :key="`${row.kind}-${row.path}`"
-          class="file-item"
-          :class="{ 'tree-folder': row.kind === 'folder' }"
-          :style="{ paddingLeft: `${row.depth * 14 + (row.kind === 'folder' ? 5 : 18)}px` }"
-          role="treeitem"
-          tabindex="0"
-          @click="row.kind === 'folder' ? tree.toggleFolder(row.path) : onFileClick(row.path)"
-          @dblclick="row.kind === 'file' && onFileDblClick(row.path)"
-        >
-          <template v-if="row.kind === 'folder'">
-            <svg
-              class="tree-chevron"
-              :class="{ 'tree-chevron--collapsed': tree.isCollapsed(row.path) }"
-              width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
-            >
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-            <svg class="tree-folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M3 5h6l2 2h10v12H3z" />
-            </svg>
-            <span class="file-name mono tree-folder-name">{{ row.name }}</span>
-            <span class="tree-folder-count">{{ row.count }}</span>
-          </template>
-          <template v-else>
-            <span
-              v-if="tree.statusByPath.value.get(row.path)"
-              class="file-status-dot"
-              :class="`file-status-dot--${tree.statusByPath.value.get(row.path)}`"
-              :title="tree.statusByPath.value.get(row.path)"
-            />
-            <span class="file-name mono">{{ row.name }}</span>
-          </template>
+      <div class="fe__tree-col">
+        <div v-if="scope.root.value" class="fe__scope" role="group" :aria-label="t('scope.picker')">
+          <span class="fe__scope-path mono" :title="scope.root.value">{{ t('scope.active', scope.root.value) }}</span>
+          <button type="button" class="fe__action-btn" @click="onWholeRepo">{{ t('scope.wholeRepo') }}</button>
         </div>
+        <p v-if="scope.goneScope.value" class="fe__scope-notice" role="status">
+          {{ t('filesView.scopeGone', scope.goneScope.value) }}
+        </p>
+        <FileTreePane
+          ref="treePane"
+          class="fe__tree"
+          :rows="tree.rows.value"
+          :selected-path="tree.selected.value"
+          :show-ignored="tree.showIgnored.value"
+          :label="scope.root.value || repoName"
+          @select="(p: string) => { tree.selected.value = p; }"
+          @activate="onActivate"
+          @toggle="(p: string) => void tree.toggle(p)"
+          @expand="(p: string) => void tree.expand(p)"
+          @collapse="(p: string) => tree.collapse(p)"
+          @retry="(d: string) => void tree.retry(d)"
+          @update:show-ignored="(v: boolean) => { tree.showIgnored.value = v; }"
+          @scope-here="(p: string) => void scope.scopeHere(p)"
+          @copy-path="onCopyPath"
+          @reveal="onReveal"
+          @open-in-editor="(p: string) => emit('open-in-editor', p)"
+        />
       </div>
 
       <div class="fe__editor-pane">
@@ -519,8 +747,34 @@ function onKeyDown(e: KeyboardEvent) {
             <span class="fe__tab-close" @click.stop="onTabClose(tab.id)">✕</span>
           </button>
         </div>
-        <div v-show="activeTab && !activeTab.binary" class="fe__content" ref="editorHost"></div>
-        <div v-if="activeTab && activeTab.binary" class="fe__empty">{{ t("files.binaryPlaceholder") }}</div>
+        <p v-if="activeTab && activeStatus?.deletedOnDisk" class="fe__notice" role="status">{{ t('filesView.preview.gone') }}</p>
+        <div v-show="activeTab && !activeTab.binary && !showDiff && !editorPending" class="fe__content" ref="editorHost"></div>
+        <p v-if="activeTab && !showDiff && editorPending" class="fe__empty" aria-busy="true">{{ t('filesView.loading') }}</p>
+        <div v-if="activeTab && activeTab.binary && !showDiff" class="fe__empty">{{ t("files.binaryPlaceholder") }}</div>
+        <div v-if="activeTab && showDiff" class="fe__diff">
+          <p v-if="diffBody.kind === 'idle' || diffBody.kind === 'loading'" class="fe__empty" aria-busy="true">{{ t('filesView.loading') }}</p>
+          <div v-else-if="diffBody.kind === 'error'" class="fe__empty fe__empty--stack fe__empty--error" role="alert">
+            <span>{{ t('filesView.preview.error', diffBody.message) }}</span>
+            <button type="button" class="fe__action-btn" @click="preview.retry()">{{ t('filesView.retry') }}</button>
+          </div>
+          <div v-else-if="diffBody.kind === 'conflicted'" class="fe__empty fe__empty--stack">
+            <span>{{ t('filesView.preview.conflicted') }}</span>
+            <button
+              type="button"
+              class="fe__action-btn fe__action-btn--active"
+              @click="emit('open-merge-editor', activeTab.path)"
+            >{{ t('filesView.preview.openMergeEditor') }}</button>
+          </div>
+          <p v-else-if="diffBody.kind === 'placeholder'" class="fe__empty">{{ diffPlaceholder(diffBody) }}</p>
+          <DiffViewer
+            v-else-if="diffBody.kind === 'diff'"
+            v-model:diff-mode="diffMode"
+            :diff="diffBody.diff"
+            :file-path="activeTab.path"
+            @open-in-editor="(p: string) => emit('open-in-editor', p)"
+            @open-file-history="(p: string) => emit('open-file-history', p)"
+          />
+        </div>
         <div v-if="!activeTab" class="fe__empty">{{ t("files.emptyHint") }}</div>
       </div>
     </div>
@@ -720,10 +974,43 @@ function onKeyDown(e: KeyboardEvent) {
   min-height: 0;
 }
 
-.fe__tree {
+.fe__tree-col {
   width: 220px;
   flex-shrink: 0;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fe__tree {
+  flex: 1;
+  min-height: 0;
+}
+
+.fe__scope {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+  font-size: var(--font-size-xs);
+}
+
+.fe__scope-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fe__scope-notice {
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
   border-right: 1px solid var(--color-border);
 }
 
@@ -765,6 +1052,14 @@ function onKeyDown(e: KeyboardEvent) {
   height: 6px;
   border-radius: 50%;
   background: var(--color-accent);
+}
+
+.fe__notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-5);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .fe__content {
@@ -811,23 +1106,45 @@ function onKeyDown(e: KeyboardEvent) {
   color: var(--color-text-muted);
 }
 
-.file-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--color-text-muted);
+.fe__empty--stack {
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
-.file-status-dot--added { background: var(--color-status-added); }
-.file-status-dot--modified { background: var(--color-status-modified, var(--color-accent)); }
-.file-status-dot--deleted { background: var(--color-danger); }
-.file-status-dot--renamed { background: var(--color-status-added); }
+.fe__empty--error {
+  color: var(--color-danger);
+}
 
-/* Tree row classes (.file-item, .tree-folder, .tree-chevron,
-   .tree-folder-icon, .tree-folder-name, .tree-folder-count, .file-name) are
-   intentionally NOT defined here — they come from the shared global rules
-   added to apps/desktop/src/assets/main.css in Step 1, also used by
-   RepoSidebar.vue's tree layout. Do not re-add them locally. */
+.fe__diff {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
 
+.fe__seg {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.fe__seg-btn {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.fe__seg-btn[aria-checked="true"] {
+  color: var(--color-text);
+  background: var(--color-bg-tertiary);
+}
+
+.fe__seg-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
+}
 </style>

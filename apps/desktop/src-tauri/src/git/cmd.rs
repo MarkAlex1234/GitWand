@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -91,13 +91,78 @@ pub(crate) fn safe_repo_path(cwd: &str, rel_path: &str) -> Result<PathBuf, Strin
 
     let resolved = match joined.canonicalize() {
         Ok(p) => p,
-        Err(_) => {
-            let parent = joined.parent().ok_or("path has no parent")?;
-            let parent_canonical = parent
-                .canonicalize()
-                .map_err(|e| format!("parent path does not resolve: {}", e))?;
-            let file_name = joined.file_name().ok_or("path has no file name")?;
-            parent_canonical.join(file_name)
+        // The path does not exist (a file about to be written, or one whose
+        // deletion is being diffed, possibly with its whole directory). Resolve
+        // the deepest ancestor that does exist, symlinks included, on the
+        // filesystem (never lexically: `linkdir/..` is the parent of the
+        // link's target), then append the missing tail. Nothing in that tail
+        // exists, so it holds no symlink; it may only be plain names, never
+        // `..`, which would be folded against a directory the OS never saw.
+        //
+        // "Does not exist" must mean exactly that. A dangling, looping or
+        // unreadable symlink also fails to canonicalize; skipping over one
+        // would accept `dangling/x` as if `dangling` were an ordinary missing
+        // directory, so any such failure is a refusal. The last component
+        // alone may be a symlink that does not resolve: it is the path itself,
+        // and it is not followed here (callers that would follow it, like
+        // `write_file`, check for it).
+        Err(e) => {
+            let unresolvable = || {
+                format!(
+                    "path does not resolve: {} (dangling, looping or unreadable component)",
+                    joined.display()
+                )
+            };
+            let leaf_is_symlink = joined
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            // ENOTDIR: a component on the way is a regular file, e.g. a
+            // deleted `secret/x` whose folder was replaced by a file named
+            // `secret`. Below a regular file nothing can exist, so that is
+            // absent too, checked once the file is found.
+            let mut below_a_file = is_not_dir(&joined, &e);
+            if !is_absent(&joined, &e) && !below_a_file && !leaf_is_symlink {
+                return Err(unresolvable());
+            }
+            let mut found = None;
+            for ancestor in joined.ancestors().skip(1) {
+                match ancestor.canonicalize() {
+                    Ok(c) => {
+                        found = Some((ancestor, c));
+                        break;
+                    }
+                    Err(e) if is_absent(ancestor, &e) => continue,
+                    Err(e) if is_not_dir(ancestor, &e) => below_a_file = true,
+                    Err(_) => return Err(unresolvable()),
+                }
+            }
+            let (ancestor, base) = found.ok_or("path has no resolvable ancestor")?;
+            // Only a regular file: a symlink to a file, in that position, is
+            // refused like any other unresolvable component.
+            if below_a_file
+                && !ancestor
+                    .symlink_metadata()
+                    .map(|m| m.file_type().is_file())
+                    .unwrap_or(false)
+            {
+                return Err(unresolvable());
+            }
+            let tail = joined.strip_prefix(ancestor).unwrap_or(&joined);
+            let mut resolved = base;
+            for component in tail.components() {
+                match component {
+                    Component::Normal(name) => resolved.push(name),
+                    Component::CurDir => {}
+                    _ => {
+                        return Err(format!(
+                            "path does not resolve: {} (`..` below a missing directory)",
+                            joined.display()
+                        ))
+                    }
+                }
+            }
+            resolved
         }
     };
 
@@ -110,6 +175,20 @@ pub(crate) fn safe_repo_path(cwd: &str, rel_path: &str) -> Result<PathBuf, Strin
     }
 
     Ok(resolved)
+}
+
+/// `true` when `path` failed to canonicalize because a component on the way is
+/// not a directory (ENOTDIR), as seen without following a final symlink.
+fn is_not_dir(path: &Path, canonicalize_err: &std::io::Error) -> bool {
+    canonicalize_err.kind() == std::io::ErrorKind::NotADirectory
+        && matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotADirectory)
+}
+
+/// `true` when `path` failed to canonicalize only because nothing exists
+/// there: not a dangling or looping symlink, not an unreadable directory.
+fn is_absent(path: &Path, canonicalize_err: &std::io::Error) -> bool {
+    canonicalize_err.kind() == std::io::ErrorKind::NotFound
+        && matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 pub(crate) static GIT_BINARY: OnceLock<Mutex<String>> = OnceLock::new();
@@ -649,6 +728,189 @@ mod tests {
         fn empty_configured_string_is_treated_as_unset() {
             let repo = TempRepo::new_trunk();
             assert_eq!(resolve_default_branch(&repo.cwd(), Some("  ")), "trunk");
+        }
+    }
+
+    // ── safe_repo_path: paths that do not exist ────────────────────────────
+
+    mod safe_repo_path_missing_tests {
+        use super::super::safe_repo_path;
+        use std::path::PathBuf;
+
+        /// A canonical temp dir, removed on drop.
+        struct Dir(PathBuf);
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        fn dir() -> Dir {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let p = std::env::temp_dir().join(format!(
+                "gitwand-safe-repo-path-{}-{}",
+                std::process::id(),
+                nanos
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Dir(p.canonicalize().unwrap())
+        }
+
+        #[test]
+        fn accepts_a_missing_file_under_missing_directories() {
+            // A deleted file whose whole directory went with it.
+            let d = dir();
+            let cwd = d.0.to_str().unwrap();
+            assert_eq!(
+                safe_repo_path(cwd, "gone/deep/f.txt").unwrap(),
+                d.0.join("gone/deep/f.txt")
+            );
+        }
+
+        // Unix only: on Windows the canonical cwd is a verbatim `\\?\` path,
+        // and `PathBuf::push` onto one folds `..` lexically, so the
+        // "`..` below a missing directory" branch never fires there (the
+        // folded path is still checked against cwd).
+        #[cfg(unix)]
+        #[test]
+        fn refuses_dotdot_below_a_missing_directory() {
+            let d = dir();
+            let cwd = d.0.to_str().unwrap();
+            for rel in ["gone/../../x", "gone/../x"] {
+                let err = safe_repo_path(cwd, rel).unwrap_err();
+                assert_eq!(
+                    err,
+                    format!(
+                        "path does not resolve: {}/{} (`..` below a missing directory)",
+                        cwd, rel
+                    )
+                );
+            }
+        }
+
+        /// `<root>/repo` (the cwd) next to `<root>/out` (outside it).
+        #[cfg(unix)]
+        fn repo_and_outside() -> (Dir, String, PathBuf) {
+            let d = dir();
+            let repo = d.0.join("repo");
+            let out = d.0.join("out");
+            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::create_dir_all(&out).unwrap();
+            let cwd = repo.to_str().unwrap().to_string();
+            (d, cwd, out)
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_a_missing_tail_below_a_symlink_leading_outside() {
+            let (_d, cwd, out) = repo_and_outside();
+            std::os::unix::fs::symlink(&out, format!("{cwd}/linkdir")).unwrap();
+            let err = safe_repo_path(&cwd, "linkdir/newfile").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
+        }
+
+        /// `linkdir/..` is the parent of the symlink's TARGET, not the repo:
+        /// folding `..` lexically would judge `linkdir/../secret` as the
+        /// repo's own `secret`.
+        #[cfg(unix)]
+        #[test]
+        fn refuses_dotdot_after_a_symlink_leading_outside() {
+            let (d, cwd, out) = repo_and_outside();
+            let sub = out.join("sub");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(out.join("secret"), "s").unwrap();
+            std::fs::write(format!("{cwd}/secret"), "in-repo").unwrap();
+            std::os::unix::fs::symlink(&sub, format!("{cwd}/linkdir")).unwrap();
+            let err = safe_repo_path(&cwd, "linkdir/../secret").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
+            let err = safe_repo_path(&cwd, "linkdir/../missing").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
+            drop(d);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_paths_below_a_dangling_or_looping_symlink() {
+            let (_d, cwd, out) = repo_and_outside();
+            std::os::unix::fs::symlink(out.join("nope"), format!("{cwd}/dangling")).unwrap();
+            std::os::unix::fs::symlink(format!("{cwd}/loop"), format!("{cwd}/loop")).unwrap();
+            for rel in ["dangling/x", "dangling/a/b", "loop/x"] {
+                let err = safe_repo_path(&cwd, rel).unwrap_err();
+                assert!(err.starts_with("path does not resolve"), "{rel}: {err}");
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_paths_below_an_unreadable_symlink() {
+            use std::os::unix::fs::PermissionsExt;
+            let (_d, cwd, out) = repo_and_outside();
+            let locked = out.join("locked");
+            std::fs::create_dir_all(locked.join("inner")).unwrap();
+            std::os::unix::fs::symlink(locked.join("inner"), format!("{cwd}/lockedlink")).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let res = safe_repo_path(&cwd, "lockedlink/x");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let err = res.unwrap_err();
+            assert!(err.starts_with("path does not resolve"), "{err}");
+        }
+
+        /// A deleted `secret/x` whose folder was later replaced by a regular
+        /// file named `secret`: resolving fails with ENOTDIR, not ENOENT, and
+        /// the path is still just a missing file inside the repo.
+        #[cfg(unix)]
+        #[test]
+        fn accepts_a_missing_path_below_a_regular_file() {
+            let (_d, cwd, _out) = repo_and_outside();
+            std::fs::write(format!("{cwd}/secret"), "now a file").unwrap();
+            for rel in ["secret/x", "secret/a/b"] {
+                assert_eq!(
+                    safe_repo_path(&cwd, rel).unwrap(),
+                    PathBuf::from(format!("{cwd}/{rel}")),
+                    "{rel}"
+                );
+            }
+        }
+
+        /// The ENOTDIR allowance is for a regular file only: a symlink to a
+        /// file (inside or outside the repo) in that position is refused.
+        #[cfg(unix)]
+        #[test]
+        fn refuses_a_missing_path_below_a_symlink_to_a_file() {
+            let (_d, cwd, out) = repo_and_outside();
+            std::fs::write(out.join("f"), "out").unwrap();
+            std::fs::write(format!("{cwd}/f"), "in").unwrap();
+            std::os::unix::fs::symlink(out.join("f"), format!("{cwd}/outlink")).unwrap();
+            std::os::unix::fs::symlink(format!("{cwd}/f"), format!("{cwd}/inlink")).unwrap();
+            for rel in ["outlink/x", "inlink/x"] {
+                assert!(safe_repo_path(&cwd, rel).is_err(), "{rel}");
+            }
+        }
+
+        /// A dangling symlink as the LAST component is not followed: a
+        /// tracked symlink whose target is missing must still be diffable.
+        /// (`write_file` refuses to write through one on its own.)
+        #[cfg(unix)]
+        #[test]
+        fn accepts_a_dangling_leaf_symlink_as_itself() {
+            let (_d, cwd, out) = repo_and_outside();
+            std::os::unix::fs::symlink(out.join("nope"), format!("{cwd}/leaf")).unwrap();
+            assert_eq!(
+                safe_repo_path(&cwd, "leaf").unwrap(),
+                PathBuf::from(format!("{cwd}/leaf"))
+            );
+        }
+
+        #[test]
+        fn refuses_a_missing_path_outside_cwd() {
+            let d = dir();
+            let cwd = d.0.to_str().unwrap();
+            let err = safe_repo_path(cwd, "../no-such-dir/x").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
+            let err = safe_repo_path(cwd, "/no-such-dir/x").unwrap_err();
+            assert!(err.starts_with("path escapes cwd"), "{err}");
         }
     }
 

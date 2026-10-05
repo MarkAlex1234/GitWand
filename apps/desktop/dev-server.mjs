@@ -10,8 +10,8 @@
 
 import { createServer } from "node:http";
 import { execSync, execFileSync, spawnSync, spawn } from "node:child_process";
-import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, unlinkSync, realpathSync, renameSync, mkdirSync, mkdtempSync, rmSync, copyFileSync, watch } from "node:fs";
-import { resolve, join, dirname, basename, sep, isAbsolute } from "node:path";
+import { readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync, unlinkSync, realpathSync, renameSync, mkdirSync, mkdtempSync, rmSync, copyFileSync, watch } from "node:fs";
+import { resolve, join, dirname, basename, sep, isAbsolute, relative } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { Socket } from "node:net";
 import { createRequire } from "node:module";
@@ -46,33 +46,141 @@ function safeRepoPath(cwd, relPath) {
 
   let cwdCanonical;
   try {
-    cwdCanonical = realpathSync(cwd);
+    // `.native`, like every resolution below: the JS `realpathSync` keeps the
+    // caller's spelling (letter case, NFC/NFD on macOS) while the native one
+    // returns the on-disk name, and mixing the two made every path an escape.
+    cwdCanonical = realpathSync.native(cwd);
   } catch (e) {
     throw new Error(`cwd does not resolve: ${e.message}`);
   }
 
-  const joined = join(cwdCanonical, relPath);
+  // Joined like Rust's `Path::join`: an absolute `relPath` replaces the root,
+  // and nothing is folded lexically. `path.resolve`/`join` would fold
+  // `linkdir/..` to the repo root, while the OS takes it to the parent of the
+  // link's TARGET, so the path is only ever resolved on the filesystem, with
+  // `realpathSync.native` (the JS `realpathSync` folds `..` first, too).
+  const joined = isAbsolute(relPath)
+    ? relPath
+    : cwdCanonical.endsWith(sep) ? cwdCanonical + relPath : cwdCanonical + sep + relPath;
 
-  // For writes the target file may not exist yet — canonicalize the parent
-  // and reassemble the final path.
+  // The path may not exist (a file about to be written, or one whose deletion
+  // is being diffed, possibly with its whole directory). Canonicalize the
+  // deepest ancestor that does exist and append the missing tail, which holds
+  // no symlink since none of it exists; it may only be plain names, never `..`.
+  // "Does not exist" means exactly that: a dangling, looping or unreadable
+  // symlink is a refusal, not a missing directory to skip. The last component
+  // alone may be a symlink that does not resolve (it is not followed here;
+  // `/api/write-file` checks for it). Mirrors the Rust helper, messages included.
   let resolved;
   try {
-    resolved = realpathSync(joined);
-  } catch {
-    const parent = dirname(joined);
-    let parentCanonical;
-    try {
-      parentCanonical = realpathSync(parent);
-    } catch (e) {
-      throw new Error(`parent path does not resolve: ${e.message}`);
+    resolved = realpathSync.native(joined);
+  } catch (err) {
+    const unresolvable = () =>
+      new Error(`path does not resolve: ${joined} (dangling, looping or unreadable component)`);
+    let leafIsSymlink = false;
+    try { leafIsSymlink = lstatSync(joined).isSymbolicLink(); } catch { /* not a symlink */ }
+    // ENOTDIR: a component on the way is a regular file (a deleted `secret/x`
+    // whose folder became a file `secret`); absent too, once the file is found
+    // to be a regular file and not a symlink. Mirrors Rust.
+    let belowAFile = isNotDir(joined, err);
+    if (!isAbsent(joined, err) && !belowAFile && !leafIsSymlink) throw unresolvable();
+
+    let ancestor = joined;
+    let base;
+    for (;;) {
+      const up = dirname(ancestor);
+      if (up === ancestor) throw new Error("path has no resolvable ancestor");
+      ancestor = up;
+      try {
+        base = realpathSync.native(ancestor);
+        break;
+      } catch (e) {
+        if (isNotDir(ancestor, e)) belowAFile = true;
+        else if (!isAbsent(ancestor, e)) throw unresolvable();
+      }
     }
-    resolved = join(parentCanonical, basename(joined));
+    if (belowAFile) {
+      let isFile = false;
+      try { isFile = lstatSync(ancestor).isFile(); } catch { /* not a file */ }
+      if (!isFile) throw unresolvable();
+    }
+    const segments = [];
+    for (const seg of joined.slice(ancestor.length).split(sep)) {
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") {
+        throw new Error(`path does not resolve: ${joined} (\`..\` below a missing directory)`);
+      }
+      segments.push(seg);
+    }
+    resolved = segments.length
+      ? (base.endsWith(sep) ? base : base + sep) + segments.join(sep)
+      : base;
   }
 
   if (resolved !== cwdCanonical && !resolved.startsWith(cwdCanonical + sep)) {
     throw new Error(`path escapes cwd (resolved: ${resolved}, cwd: ${cwdCanonical})`);
   }
   return resolved;
+}
+
+/**
+ * `true` when `p` failed to resolve only because nothing exists there: not a
+ * dangling or looping symlink, not an unreadable directory. Mirrors Rust's
+ * `is_absent` in `src-tauri/src/git/cmd.rs`.
+ */
+function isAbsent(p, err) {
+  if (err?.code !== "ENOENT") return false;
+  try {
+    lstatSync(p);
+    return false;
+  } catch (e) {
+    return e.code === "ENOENT";
+  }
+}
+
+/**
+ * `true` when `p` failed to resolve because a component on the way is not a
+ * directory (ENOTDIR), as seen without following a final symlink. Mirrors
+ * Rust's `is_not_dir`.
+ */
+function isNotDir(p, err) {
+  if (err?.code !== "ENOTDIR") return false;
+  try {
+    lstatSync(p);
+    return false;
+  } catch (e) {
+    return e.code === "ENOTDIR";
+  }
+}
+
+/**
+ * `path` as a clean repo-relative path, `/`-separated (no `./`, an absolute
+ * path inside the repo made relative), falling back to the guard's resolved
+ * path when it cannot be cleaned lexically. Mirrors Rust's
+ * `repo_relative_path` in `commands/read.rs`, so both backends hand git the
+ * same argument and produce the same diff header.
+ */
+function repoRelativePath(cwd, root, path, guarded) {
+  let rel = null;
+  if (isAbsolute(path)) {
+    for (const base of [cwd, root]) {
+      const prefix = base.endsWith(sep) ? base : base + sep;
+      if (path === base) { rel = ""; break; }
+      if (path.startsWith(prefix)) { rel = path.slice(prefix.length); break; }
+    }
+  } else {
+    rel = path;
+  }
+  let parts = [];
+  if (rel !== null) {
+    for (const seg of rel.split(sep)) {
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") { parts = []; break; }
+      parts.push(seg);
+    }
+  }
+  if (!parts.length) parts = relative(root, guarded).split(sep).filter(Boolean);
+  return parts.join("/");
 }
 
 /** Resolve the full path to a CLI binary, checking Homebrew paths on macOS. */
@@ -106,6 +214,97 @@ function devExtractPercent(line) {
   const m = before.match(/(\d+(?:\.\d+)?)\s*$/);
   if (!m) return 0;
   return Math.min(100, Math.max(0, parseFloat(m[1])));
+}
+
+/** Per-directory cap of `list_repo_dir` — mirrors MAX_REPO_DIR_ENTRIES in files.rs. */
+const MAX_REPO_DIR_ENTRIES = 5000;
+
+/** Code-point order, the same as Rust's `str::cmp` (UTF-8 byte order). */
+function cmpCodePoints(a, b) {
+  return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+}
+
+/**
+ * Mirror of the Tauri `list_repo_dir` command (Files view, v3.11.2): one level
+ * of the working tree, `.git` skipped, symlinks reported and never followed,
+ * non-UTF-8 names skipped, sorted directories first then case-insensitively,
+ * capped after sorting. Rust classifies ignores in process with libgit2; this
+ * process has no libgit2, so it makes one `git check-ignore -z --stdin` call,
+ * which already leaves tracked paths out (verified 2026-10-01: `build/`
+ * holding a tracked file and a force-added `*.log` are not reported). Slow on
+ * a huge directory, but dev-only. Pinned by tests/parity/list-repo-dir.test.mjs.
+ */
+function devListRepoDir(cwd, rawDir, includeIgnored) {
+  if (!cwd || !cwd.trim()) throw new Error("cwd must not be empty");
+  const dir = String(rawDir ?? "").replace(/^\/+|\/+$/g, "");
+  if (dir.split("/").includes(".git")) throw new Error(`Refusing to list inside .git: ${dir}`);
+  const resolved = safeRepoPath(cwd, dir === "" ? "." : dir);
+  let st;
+  try {
+    st = statSync(resolved);
+  } catch {
+    throw new Error(`Directory not found: ${dir}`);
+  }
+  if (!st.isDirectory()) throw new Error(`Not a directory: ${dir}`);
+
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const raw = [];
+  let dirents;
+  try {
+    dirents = readdirSync(resolved, { withFileTypes: true, encoding: "buffer" });
+  } catch (e) {
+    throw new Error(`Failed to list ${dir || "."}: ${e.message}`);
+  }
+  for (const d of dirents) {
+    let name;
+    try {
+      name = decoder.decode(d.name);
+    } catch {
+      continue; // not UTF-8: no path built from it could round-trip
+    }
+    if (name === ".git") continue;
+    const kind = d.isSymbolicLink() ? "symlink" : d.isDirectory() ? "dir" : "file";
+    let size = 0;
+    if (kind === "file") {
+      try { size = lstatSync(join(resolved, name)).size; } catch { size = 0; }
+    }
+    raw.push({ name, kind, size });
+  }
+  raw.sort((a, b) => {
+    if ((a.kind === "dir") !== (b.kind === "dir")) return a.kind === "dir" ? -1 : 1;
+    return cmpCodePoints(a.name.toLowerCase(), b.name.toLowerCase()) || cmpCodePoints(a.name, b.name);
+  });
+
+  const prefix = dir ? `${dir}/` : "";
+  const rels = raw.map((e) => prefix + e.name);
+  let ignoredSet = new Set();
+  if (rels.length > 0) {
+    const r = spawnSync(GIT, ["check-ignore", "-z", "--stdin"], {
+      cwd,
+      input: rels.join("\0") + "\0",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    // 0 = some ignored, 1 = none ignored; anything else is a git failure,
+    // reported but not fatal (the listing is still right about what exists).
+    if (r.status === 0) {
+      ignoredSet = new Set(r.stdout.toString("utf8").split("\0").filter(Boolean));
+    } else if (r.status !== 1) {
+      console.warn(`[dev] list-repo-dir: git check-ignore failed: ${r.stderr?.toString() ?? r.error}`);
+    }
+  }
+
+  const entries = [];
+  let truncated = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ignored = ignoredSet.has(rels[i]);
+    if (ignored && !includeIgnored) continue;
+    if (entries.length === MAX_REPO_DIR_ENTRIES) {
+      truncated = true;
+      break;
+    }
+    entries.push({ name: raw[i].name, path: rels[i], kind: raw[i].kind, ignored, size: raw[i].size });
+  }
+  return { entries, truncated };
 }
 
 /**
@@ -182,6 +381,11 @@ console.log(`[dev-server] git binary: ${GIT}`);
  * non-zero or the process fails to spawn.
  */
 function gitSpawn(args, cwd) {
+  return gitSpawnBytes(args, cwd).then((buf) => buf.toString("utf-8"));
+}
+
+/** `gitSpawn`, resolving the raw stdout bytes. */
+function gitSpawnBytes(args, cwd) {
   return new Promise((resolve, reject) => {
     const child = spawn(GIT, args, { cwd });
     const stdoutChunks = [];
@@ -197,9 +401,24 @@ function gitSpawn(args, cwd) {
         reject(new Error(`git ${args.join(" ")} exited with ${code}: ${stderr.trim()}`));
         return;
       }
-      resolve(Buffer.concat(stdoutChunks).toString("utf-8"));
+      resolve(Buffer.concat(stdoutChunks));
     });
   });
+}
+
+/** Mirrors `DIFF_TRUNCATE_BYTES` in src-tauri/src/types.rs. */
+const DIFF_TRUNCATE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Mirrors `truncate_diff_output` in src-tauri/src/commands/read.rs: cap raw
+ * diff bytes at DIFF_TRUNCATE_BYTES, cut back to the last newline so the
+ * parser only sees complete lines, and report the original size.
+ */
+function truncateDiffOutput(raw) {
+  if (raw.length <= DIFF_TRUNCATE_BYTES) return { text: raw.toString("utf-8"), truncatedFromBytes: undefined };
+  let cut = DIFF_TRUNCATE_BYTES;
+  while (cut > 0 && raw[cut - 1] !== 0x0a) cut--;
+  return { text: raw.subarray(0, cut).toString("utf-8"), truncatedFromBytes: raw.length };
 }
 
 /**
@@ -1773,7 +1992,16 @@ async function handleRequest(req, res) {
       let fullPath;
       try { fullPath = safeRepoPath(cwd, path); }
       catch (e) { return jsonResponse(req, res, { error: e.message }, 400); }
-      writeFileSync(fullPath, content, "utf-8");
+      // The guard resolves a symlink that leads somewhere real, so `fullPath`
+      // is only still a symlink when it dangles (or loops). Writing through it
+      // would create its target, wherever that is. Mirrors Rust's write_file.
+      let isLink = false;
+      try { isLink = lstatSync(fullPath).isSymbolicLink(); } catch { /* absent */ }
+      if (isLink) {
+        return jsonResponse(req, res, { error: `refusing to write through a symlink that does not resolve: ${path}` }, 400);
+      }
+      try { writeFileSync(fullPath, content, "utf-8"); }
+      catch (e) { return jsonResponse(req, res, { error: `Failed to write ${path}: ${e.message}` }, 500); }
       return jsonResponse(req, res, { ok: true });
     }
 
@@ -2052,6 +2280,37 @@ async function handleRequest(req, res) {
       return jsonResponse(req, res, { root, truncated });
     }
 
+    // POST /api/list-repo-dir  { cwd, dir, includeIgnored }
+    //
+    // Mirrors the Tauri `list_repo_dir` command (Files view, v3.11.2) through
+    // devListRepoDir() above. Response: { entries, truncated }, camelCase like
+    // the Rust struct's `rename_all = "camelCase"`.
+    if (url.pathname === "/api/list-repo-dir" && req.method === "POST") {
+      const { cwd, dir = "", includeIgnored = false } = await readBody(req);
+      try {
+        return jsonResponse(req, res, devListRepoDir(cwd, dir, includeIgnored === true));
+      } catch (e) {
+        return jsonResponse(req, res, { error: e.message }, 400);
+      }
+    }
+
+    // POST /api/reveal-in-file-manager  { cwd, path }
+    //
+    // Stands in for the Tauri `reveal_in_file_manager` (v3.11.2), which opens
+    // the OS file manager: only the packaged app on the user's desktop session
+    // can do that. The route validates the path exactly as the Rust command
+    // does (safe_repo_path, then existence), so a bad path fails the same way
+    // under `pnpm dev:web`, and then it only logs.
+    if (url.pathname === "/api/reveal-in-file-manager" && req.method === "POST") {
+      const { cwd, path } = await readBody(req);
+      let full;
+      try { full = safeRepoPath(cwd, path); }
+      catch (e) { return jsonResponse(req, res, { error: e.message }, 400); }
+      if (!existsSync(full)) return jsonResponse(req, res, { error: `Path not found: ${path}` }, 400);
+      console.info(`[dev] revealInFileManager: ${full}`);
+      return jsonResponse(req, res, { ok: true });
+    }
+
     // GET /api/list-dir?path=/some/dir  — list directories for folder picker
     if (url.pathname === "/api/list-dir" && req.method === "GET") {
       const dirPath = resolve(url.searchParams.get("path") || homedir());
@@ -2324,6 +2583,19 @@ async function handleRequest(req, res) {
 
       if (!cwd || !path) return jsonResponse(req, res, { error: "Missing cwd or path param" }, 400);
 
+      // Every branch below hands `path` to git, and the untracked fallback
+      // runs `git diff --no-index`, which reads whatever file it names. Refuse
+      // anything resolving outside the repo first, like Rust's `git_diff`.
+      let gitPath;
+      try {
+        const guarded = safeRepoPath(cwd, path);
+        const root = realpathSync.native(cwd);
+        if (guarded === root) throw new Error("path must not be the repository root");
+        gitPath = repoRelativePath(cwd, root, path, guarded);
+      } catch (e) {
+        return jsonResponse(req, res, { error: e.message }, 400);
+      }
+
       try {
         const resolvedCwd = resolve(cwd);
 
@@ -2352,12 +2624,13 @@ async function handleRequest(req, res) {
           });
         }
 
-        const args = staged ? ["diff", "--cached", "--", path] : ["diff", "--", path];
+        const args = staged ? ["diff", "--cached", "--", gitPath] : ["diff", "--", gitPath];
         let stdout;
+        let truncatedFromBytes;
         try {
           // Stream via spawn — execSync's default 1 MB cap blows up on large files
           // (lockfiles, generated assets, big migrations…).
-          stdout = await gitSpawn(args, resolvedCwd);
+          ({ text: stdout, truncatedFromBytes } = truncateDiffOutput(await gitSpawnBytes(args, resolvedCwd)));
         } catch { stdout = ""; }
 
         // ── New untracked file: fall back to --no-index diff (all lines green) ──
@@ -2368,17 +2641,21 @@ async function handleRequest(req, res) {
         // renders the entire file as an addition instead of showing no
         // unstaged change. Drift found by tests/parity/git-diff (issue #183).
         if (!stdout.trim() && !staged) {
-          const absFile = join(resolvedCwd, path);
+          const absFile = join(resolvedCwd, gitPath);
           const tracked =
-            spawnSync(GIT, ["ls-files", "--error-unmatch", "--", path], {
+            spawnSync(GIT, ["ls-files", "--error-unmatch", "--", gitPath], {
               cwd: resolvedCwd,
               encoding: "utf-8",
             }).status === 0;
           if (!tracked && existsSync(absFile) && !statSync(absFile).isDirectory()) {
-            const r = spawnSync("git", ["diff", "--no-index", "--", "/dev/null", absFile], {
-              cwd: resolvedCwd, encoding: "utf-8",
+            // Raw bytes, no maxBuffer cap: like the Rust side, read it all,
+            // then truncate the same way as the plain diff. The repo-relative
+            // path (as in Rust) keeps the header, hence the byte count and the
+            // cut, identical on both sides.
+            const r = spawnSync(GIT, ["diff", "--no-index", "--", "/dev/null", gitPath], {
+              cwd: resolvedCwd, maxBuffer: Infinity,
             });
-            stdout = r.stdout || "";
+            ({ text: stdout, truncatedFromBytes } = truncateDiffOutput(r.stdout || Buffer.alloc(0)));
           }
         }
 
@@ -2448,7 +2725,12 @@ async function handleRequest(req, res) {
 
         if (currentHunk) hunks.push(currentHunk);
 
-        return jsonResponse(req, res, { path, hunks, ...(status ? { status } : {}) });
+        return jsonResponse(req, res, {
+          path,
+          hunks,
+          ...(status ? { status } : {}),
+          ...(truncatedFromBytes !== undefined ? { truncatedFromBytes } : {}),
+        });
       } catch (err) {
         return jsonResponse(req, res, { error: err.stderr?.toString() || err.message }, 500);
       }

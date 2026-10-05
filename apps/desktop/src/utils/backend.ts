@@ -410,6 +410,51 @@ export async function listRepoTree(cwd: string): Promise<RepoTreeResult> {
   return res.json();
 }
 
+// ─── One working-tree directory (Files view, v3.11.2) ────────────────
+
+/** One entry of `listRepoDir`. `path` is repo-relative with `/` separators. */
+export interface RepoDirEntry {
+  name: string;
+  path: string;
+  /** Symlinks are reported, never followed. */
+  kind: "file" | "dir" | "symlink";
+  /** Matched by an ignore rule and not tracked. Only returned when requested. */
+  ignored: boolean;
+  /** Byte length for files; 0 for directories and symlinks. */
+  size: number;
+}
+
+export interface RepoDirListing {
+  entries: RepoDirEntry[];
+  /** More than 5,000 listable entries: only the first 5,000 are returned. */
+  truncated: boolean;
+}
+
+/**
+ * List one directory of the working tree (`dir` is repo-relative, "" for the
+ * root). `.git` is never listed. Ignored entries are dropped unless
+ * `includeIgnored`, in which case they come back with `ignored: true`.
+ */
+export async function listRepoDir(
+  cwd: string,
+  dir: string,
+  includeIgnored: boolean,
+): Promise<RepoDirListing> {
+  if (isTauri()) {
+    return tauriInvoke<RepoDirListing>("list_repo_dir", { cwd, dir, includeIgnored });
+  }
+  const res = await devFetch(`${DEV_SERVER}/api/list-repo-dir`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd, dir, includeIgnored }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `list_repo_dir failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ─── Git status ────────────────────────────────────────────
 
 export interface FileChange {
@@ -558,6 +603,12 @@ export async function getGitDiff(
   if (isTauri()) {
     const raw = await tauriInvoke<{
       path: string;
+      status?: GitDiff["status"];
+      oldPath?: string;
+      truncatedFromBytes?: number;
+      isDirectory?: boolean;
+      newFiles?: string[];
+      nestedRepo?: boolean;
       hunks: Array<{
         header: string;
         old_start: number;
@@ -575,6 +626,15 @@ export async function getGitDiff(
 
     return {
       path: raw.path,
+      // Already camelCase on the wire (explicit serde renames in types.rs).
+      // Dropping them hid the 5 MB truncation banner and the untracked-
+      // directory / nested-repo panel (issue #183) in the packaged app only.
+      status: raw.status,
+      oldPath: raw.oldPath,
+      truncatedFromBytes: raw.truncatedFromBytes,
+      isDirectory: raw.isDirectory,
+      newFiles: raw.newFiles,
+      nestedRepo: raw.nestedRepo,
       hunks: raw.hunks.map((h) => ({
         header: h.header,
         oldStart: h.old_start,
@@ -1507,6 +1567,27 @@ export async function openInEditor(cwd: string, path: string, editor: string = "
   }
   // In browser dev mode, just log — no meaningful way to open an editor
   console.info(`[dev] openInEditor: ${cwd}/${path} (editor: ${editor || "code"})`);
+}
+
+/**
+ * Show a working-tree path in the OS file manager (Files view, v3.11.2):
+ * selected in Finder / Explorer, its folder opened on Linux. Throws with the
+ * backend's message when the path is missing or outside the repo.
+ */
+export async function revealInFileManager(cwd: string, path: string): Promise<void> {
+  if (isTauri()) {
+    await tauriInvoke("reveal_in_file_manager", { cwd, path });
+    return;
+  }
+  const res = await devFetch(`${DEV_SERVER}/api/reveal-in-file-manager`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd, path }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `reveal_in_file_manager failed: ${res.status}`);
+  }
 }
 
 /**

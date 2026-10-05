@@ -143,6 +143,7 @@ export const COMMAND_REGISTRY: Record<string, CommandRegistryEntry> = {
   gl_list_issues: { route: "/api/gl-list-issues" },
   list_dir: { route: "/api/list-dir" },
   list_repo_tree: { route: "/api/list-repo-tree" },
+  list_repo_dir: { route: "/api/list-repo-dir" },
   path_exists: { route: "/api/path-exists" },
   preview_cherry_pick: { route: "/api/preview-cherry-pick" },
   preview_merge: { route: "/api/preview-merge" },
@@ -150,6 +151,10 @@ export const COMMAND_REGISTRY: Record<string, CommandRegistryEntry> = {
   read_file: { route: "/api/read-file" },
   read_file_at_revision: { route: "/api/read-file-at-revision" },
   read_gitwandrc: { route: "/api/read-gitwandrc" },
+  // The route validates the path like the Rust command and then only logs:
+  // opening Finder / Explorer needs the packaged app on a desktop session, so
+  // manual QA of the reveal itself happens in the Tauri app (spec §9).
+  reveal_in_file_manager: { route: "/api/reveal-in-file-manager" },
   reconstruct_conflict: { route: "/api/reconstruct-conflict" },
   resolve_tree_conflict: { route: "/api/resolve-tree-conflict" },
   scan_secrets: { route: "/api/scan-secrets" },

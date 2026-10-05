@@ -2066,6 +2066,7 @@ const paletteActions = computed<PaletteAction[]>(() => {
     { id: "view-changes", label: t("header.paletteViewChanges") },
     { id: "view-log", label: t("header.paletteViewLog") },
     { id: "view-graph", label: t("header.paletteViewGraph") },
+    { id: "toggle-file-explorer", label: t("header.paletteToggleFileExplorer") },
   );
 
   // Overlays
@@ -2104,6 +2105,7 @@ function onPaletteAction(id: string) {
     case "view-changes": viewMode.value = "changes"; break;
     case "view-log": viewMode.value = "history"; break;
     case "view-graph": viewMode.value = "graph"; break;
+    case "toggle-file-explorer": toggleFiles(); break;
     case "open-settings": showSettings.value = true; break;
     case "open-stash": showStash.value = true; break;
     case "open-worktrees": showWorktrees.value = true; break;
@@ -2241,6 +2243,15 @@ function toggleFiles() {
   // Opening the File Explorer is a dock switch too: dismiss the terminal
   // (opt-out via its own terminalHideOnNav setting), same as changing views.
   if (opening && showTerminal.value && settings.value.terminalHideOnNav) showTerminal.value = false;
+}
+
+/**
+ * v3.11.2 — the panel hands a file to the Changes view (merge editor, file
+ * history). That is a navigation like a dock switch, so the same
+ * `filesHideOnNav` rule dismisses the panel, which would otherwise cover it.
+ */
+function hideFilesOnHandoff(): void {
+  if (showFiles.value && settings.value.filesHideOnNav) showFiles.value = false;
 }
 
 async function onRequestCloseFileTab(tabId: number) {
@@ -4073,6 +4084,7 @@ useAppMenu(
     toggleSidebar: () => {
       showSidebar.value = !showSidebar.value;
     },
+    toggleFileExplorer: () => toggleFiles(),
     findInLog: () => {
       // Switch to the log/history view first — focusing a hidden input
       // would silently no-op because the element isn't mounted.
@@ -4568,8 +4580,12 @@ onUnmounted(() => {
           v-if="showFiles && repoFolderPath"
           :repo-path="repoFolderPath"
           :changed-files="repoFiles"
+          :watcher="repoWatcher"
           @close="showFiles = false"
           @request-close-tab="onRequestCloseFileTab"
+          @open-in-editor="handleOpenInEditor"
+          @open-merge-editor="(p: string) => { hideFilesOnHandoff(); handleOpenResidual(p); }"
+          @open-file-history="(p: string) => { hideFilesOnHandoff(); openFileHistory(p); viewMode = 'changes'; }"
         />
       </KeepAlive>
 

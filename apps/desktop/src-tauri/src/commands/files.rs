@@ -8,6 +8,8 @@
 //!     used by the diff browser to surface a folder-level summary.
 //!   - `list_dir` — directory browser for the FolderPicker (handles macOS
 //!     TCC-protected directories at $HOME without triggering prompts).
+//!   - `list_repo_dir` — one level of the working tree for the Files view
+//!     (v3.11.2), git-aware: ignored entries are classified with libgit2.
 //!
 //! All helpers used here (safe_repo_path, git_cmd, parse_name_status_z,
 //! parse_numstat_z, folder_diff_args, insert_change, sort_node,
@@ -26,6 +28,19 @@ pub(crate) async fn read_file(cwd: String, path: String) -> Result<String, Strin
 #[tauri::command]
 pub(crate) async fn write_file(cwd: String, path: String, content: String) -> Result<(), String> {
     let full = safe_repo_path(&cwd, &path)?;
+    // `safe_repo_path` resolves a symlink that leads somewhere real, so `full`
+    // is only still a symlink when it dangles (or loops). Writing through it
+    // would create its target, wherever that is, including outside the repo.
+    if full
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "refusing to write through a symlink that does not resolve: {}",
+            path
+        ));
+    }
     std::fs::write(&full, &content).map_err(|e| format!("Failed to write {}: {}", path, e))
 }
 
@@ -371,6 +386,143 @@ pub(crate) async fn list_repo_tree(cwd: String) -> Result<RepoTreeResult, String
     build_repo_tree(&cwd)
 }
 
+// ─── One working-tree directory (Files view, v3.11.2) ──────
+
+/// Per-directory cap for `list_repo_dir`, keeping the IPC payload well under
+/// the 1 MB budget of apps/desktop/CLAUDE.md (P6.4). Mirrored by
+/// `MAX_REPO_DIR_ENTRIES` in dev-server.mjs and `DIR_ENTRY_CAP` in
+/// useLazyRepoTree.ts.
+pub(crate) const MAX_REPO_DIR_ENTRIES: usize = 5_000;
+
+struct RawDirEntry {
+    name: String,
+    kind: &'static str,
+    size: u64,
+}
+
+/// Ignored means "matched by an ignore rule AND not tracked". libgit2's
+/// `is_path_ignored` applies the rules without looking at the index, so a
+/// force-added file, or a directory holding a tracked file, would otherwise
+/// read as ignored. Measured against `git check-ignore` on 2026-10-01 (spec §4).
+fn is_ignored_untracked(
+    repo: &git2::Repository,
+    index: &git2::Index,
+    rel: &str,
+    is_dir: bool,
+) -> bool {
+    if !repo.is_path_ignored(rel).unwrap_or(false) {
+        return false;
+    }
+    if is_dir {
+        index.find_prefix(format!("{}/", rel)).is_err()
+    } else {
+        index.get_path(std::path::Path::new(rel), 0).is_none()
+    }
+}
+
+/// Pure, synchronously-testable core of `list_repo_dir`.
+///
+/// One level only (`read_dir`). `.git` is always skipped, symlinks are
+/// reported as `symlink` and never followed, and names that are not UTF-8 are
+/// skipped because no path built from them could round-trip through IPC.
+/// Entries are sorted directories first, then case-insensitively by name,
+/// *before* classification, so the cap keeps the same first 5,000 entries on
+/// both backends and classification stops as soon as the cap is passed.
+fn build_repo_dir_listing(
+    cwd: &str,
+    dir: &str,
+    include_ignored: bool,
+) -> Result<RepoDirListing, String> {
+    if cwd.trim().is_empty() {
+        return Err("cwd must not be empty".to_string());
+    }
+    let dir = dir.trim_matches('/');
+    if dir.split('/').any(|c| c == ".git") {
+        return Err(format!("Refusing to list inside .git: {}", dir));
+    }
+    // `safe_repo_path` refuses an empty path; "." resolves to the canonical
+    // repo root through the same checks.
+    let resolved = safe_repo_path(cwd, if dir.is_empty() { "." } else { dir })?;
+    if !resolved.is_dir() {
+        return Err(if resolved.exists() {
+            format!("Not a directory: {}", dir)
+        } else {
+            format!("Directory not found: {}", dir)
+        });
+    }
+    let label = if dir.is_empty() { "." } else { dir };
+    let read =
+        std::fs::read_dir(&resolved).map_err(|e| format!("Failed to list {}: {}", label, e))?;
+
+    let mut raw: Vec<RawDirEntry> = Vec::new();
+    for entry in read.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name == ".git" {
+            continue;
+        }
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        let (kind, size) = if ft.is_symlink() {
+            ("symlink", 0)
+        } else if ft.is_dir() {
+            ("dir", 0)
+        } else {
+            ("file", entry.metadata().map(|m| m.len()).unwrap_or(0))
+        };
+        raw.push(RawDirEntry { name, kind, size });
+    }
+    raw.sort_by(|a, b| {
+        (a.kind != "dir")
+            .cmp(&(b.kind != "dir"))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    // Opened once per call: the repo for its ignore rules, the index for
+    // "is this tracked?".
+    let repo = git2::Repository::open(cwd).map_err(|e| format!("git2 open: {}", e))?;
+    let index = repo.index().map_err(|e| format!("git2 index: {}", e))?;
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", dir)
+    };
+
+    let mut entries: Vec<RepoDirEntry> = Vec::new();
+    let mut truncated = false;
+    for e in raw {
+        let rel = format!("{}{}", prefix, e.name);
+        let ignored = is_ignored_untracked(&repo, &index, &rel, e.kind == "dir");
+        if ignored && !include_ignored {
+            continue;
+        }
+        if entries.len() == MAX_REPO_DIR_ENTRIES {
+            truncated = true;
+            break;
+        }
+        entries.push(RepoDirEntry {
+            name: e.name,
+            path: rel,
+            kind: e.kind.to_string(),
+            ignored,
+            size: e.size,
+        });
+    }
+    Ok(RepoDirListing { entries, truncated })
+}
+
+#[tauri::command]
+pub(crate) async fn list_repo_dir(
+    cwd: String,
+    dir: String,
+    include_ignored: bool,
+) -> Result<RepoDirListing, String> {
+    build_repo_dir_listing(&cwd, &dir, include_ignored)
+}
+
 #[cfg(test)]
 mod list_repo_tree_tests {
     use super::*;
@@ -380,8 +532,8 @@ mod list_repo_tree_tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    struct TempRepo {
-        path: PathBuf,
+    pub(super) struct TempRepo {
+        pub(super) path: PathBuf,
     }
 
     impl Drop for TempRepo {
@@ -391,7 +543,7 @@ mod list_repo_tree_tests {
     }
 
     impl TempRepo {
-        fn new(label: &str) -> Self {
+        pub(super) fn new(label: &str) -> Self {
             let n = COUNTER.fetch_add(1, Ordering::SeqCst);
             let pid = std::process::id();
             let nanos = std::time::SystemTime::now()
@@ -410,11 +562,11 @@ mod list_repo_tree_tests {
             repo
         }
 
-        fn cwd(&self) -> String {
+        pub(super) fn cwd(&self) -> String {
             self.path.to_string_lossy().to_string()
         }
 
-        fn write(&self, rel: &str, content: &str) {
+        pub(super) fn write(&self, rel: &str, content: &str) {
             let p = self.path.join(rel);
             if let Some(parent) = p.parent() {
                 std::fs::create_dir_all(parent).unwrap();
@@ -422,7 +574,7 @@ mod list_repo_tree_tests {
             std::fs::write(p, content).unwrap();
         }
 
-        fn git(&self, args: &[&str]) {
+        pub(super) fn git(&self, args: &[&str]) {
             let status = StdCommand::new("git")
                 .args(args)
                 .current_dir(&self.path)
@@ -472,5 +624,377 @@ mod list_repo_tree_tests {
     fn rejects_empty_cwd() {
         let err = build_repo_tree("").unwrap_err();
         assert!(err.contains("cwd must not be empty"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod write_file_tests {
+    use super::list_repo_tree_tests::TempRepo;
+    use super::*;
+
+    fn write(repo: &TempRepo, path: &str) -> Result<(), String> {
+        tauri::async_runtime::block_on(write_file(repo.cwd(), path.to_string(), "new".into()))
+    }
+
+    /// A sibling of the repo, removed on drop.
+    struct Outside(PathBuf);
+    impl Drop for Outside {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn outside(repo: &TempRepo) -> Outside {
+        let mut name = repo.path.file_name().unwrap().to_os_string();
+        name.push("-outside");
+        let p = repo.path.parent().unwrap().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        Outside(p)
+    }
+
+    /// Writing through a dangling symlink creates its target, wherever that
+    /// is: this used to create a file outside the repository.
+    #[test]
+    fn refuses_a_dangling_leaf_symlink_and_creates_nothing() {
+        let repo = TempRepo::new("write-dangling");
+        let out = outside(&repo);
+        let target = out.0.join("newfile");
+        std::os::unix::fs::symlink(&target, repo.path.join("danglingleaf")).unwrap();
+        let err = write(&repo, "danglingleaf").unwrap_err();
+        assert!(
+            err.starts_with("refusing to write through a symlink"),
+            "{err}"
+        );
+        assert!(
+            !target.exists(),
+            "write_file created a file outside the repo"
+        );
+
+        let inside = repo.path.join("missing-in-repo");
+        std::os::unix::fs::symlink(&inside, repo.path.join("dangling-in")).unwrap();
+        assert!(write(&repo, "dangling-in").is_err());
+        assert!(!inside.exists());
+    }
+
+    #[test]
+    fn refuses_a_symlink_pointing_outside() {
+        let repo = TempRepo::new("write-out");
+        let out = outside(&repo);
+        std::fs::write(out.0.join("f"), "orig").unwrap();
+        std::os::unix::fs::symlink(out.0.join("f"), repo.path.join("link")).unwrap();
+        assert!(write(&repo, "link").is_err());
+        assert_eq!(std::fs::read_to_string(out.0.join("f")).unwrap(), "orig");
+    }
+
+    #[test]
+    fn still_writes_plain_new_and_in_repo_symlinked_files() {
+        let repo = TempRepo::new("write-ok");
+        repo.write("a.txt", "old");
+        write(&repo, "a.txt").expect("plain file");
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("a.txt")).unwrap(),
+            "new"
+        );
+        write(&repo, "brand-new.txt").expect("new file");
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("brand-new.txt")).unwrap(),
+            "new"
+        );
+        repo.write("t.txt", "old");
+        std::os::unix::fs::symlink(repo.path.join("t.txt"), repo.path.join("l.txt")).unwrap();
+        write(&repo, "l.txt").expect("in-repo symlink");
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("t.txt")).unwrap(),
+            "new"
+        );
+    }
+}
+
+#[cfg(test)]
+mod list_repo_dir_tests {
+    use super::list_repo_tree_tests::TempRepo;
+    use super::*;
+    use crate::types::{RepoDirEntry, RepoDirListing};
+
+    /// A repo whose ignore rules come only from its own `.gitignore`: the
+    /// developer's global excludes file must not leak into the assertions.
+    /// The path does not need to exist; git and libgit2 skip a missing one.
+    fn hermetic(label: &str) -> TempRepo {
+        let repo = TempRepo::new(label);
+        let none = repo.path.join(".git").join("no-global-excludes");
+        repo.git(&["config", "core.excludesFile", &none.to_string_lossy()]);
+        repo
+    }
+
+    fn names(l: &RepoDirListing) -> Vec<&str> {
+        l.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    fn entry<'a>(l: &'a RepoDirListing, name: &str) -> &'a RepoDirEntry {
+        l.entries
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("no entry {name} in {:?}", names(l)))
+    }
+
+    #[test]
+    fn lists_one_level_sorted_dirs_first_case_insensitively() {
+        let repo = hermetic("sort");
+        repo.write("src/main.rs", "fn main() {}");
+        repo.write("alpha.md", "a");
+        repo.write("Beta.txt", "b");
+        repo.write("zeta.txt", "z");
+        repo.write("Docs/readme.md", "d");
+        repo.git(&["add", "alpha.md", "src/main.rs"]);
+        repo.git(&["commit", "-q", "-m", "init"]);
+
+        let l = build_repo_dir_listing(&repo.cwd(), "", false).unwrap();
+        assert_eq!(
+            names(&l),
+            vec!["Docs", "src", "alpha.md", "Beta.txt", "zeta.txt"]
+        );
+        assert!(!l.truncated);
+        let src = entry(&l, "src");
+        assert_eq!(
+            (src.kind.as_str(), src.path.as_str(), src.size),
+            ("dir", "src", 0)
+        );
+        let alpha = entry(&l, "alpha.md");
+        assert_eq!(
+            (alpha.kind.as_str(), alpha.size, alpha.ignored),
+            ("file", 1, false)
+        );
+        // Untracked and not ignored.
+        assert!(!entry(&l, "Beta.txt").ignored);
+        // One level only: nothing from inside src/ or Docs/.
+        assert!(l.entries.iter().all(|e| !e.path.contains('/')));
+    }
+
+    #[test]
+    fn lists_a_subdirectory_with_repo_relative_paths() {
+        let repo = hermetic("subdir");
+        repo.write("src/lib/a.rs", "");
+        repo.write("src/b.rs", "");
+        let l = build_repo_dir_listing(&repo.cwd(), "src", false).unwrap();
+        assert_eq!(names(&l), vec!["lib", "b.rs"]);
+        assert_eq!(entry(&l, "lib").path, "src/lib");
+        assert_eq!(entry(&l, "b.rs").path, "src/b.rs");
+        // A trailing slash names the same directory.
+        let slashed = build_repo_dir_listing(&repo.cwd(), "src/", false).unwrap();
+        assert_eq!(slashed.entries, l.entries);
+    }
+
+    #[test]
+    fn ignored_entries_are_dropped_unless_requested() {
+        let repo = hermetic("ignored");
+        repo.write(".gitignore", "node_modules/\n*.log\n");
+        repo.write("node_modules/pkg/index.js", "");
+        repo.write("debug.log", "x");
+        repo.write("notes.txt", "n");
+        repo.git(&["add", ".gitignore"]);
+        repo.git(&["commit", "-q", "-m", "ignore"]);
+
+        let hidden = build_repo_dir_listing(&repo.cwd(), "", false).unwrap();
+        assert_eq!(names(&hidden), vec![".gitignore", "notes.txt"]);
+
+        let shown = build_repo_dir_listing(&repo.cwd(), "", true).unwrap();
+        assert_eq!(
+            names(&shown),
+            vec!["node_modules", ".gitignore", "debug.log", "notes.txt"]
+        );
+        assert!(entry(&shown, "node_modules").ignored);
+        assert!(entry(&shown, "debug.log").ignored);
+        assert!(!entry(&shown, "notes.txt").ignored);
+
+        // Inside an ignored directory every untracked entry is ignored.
+        let inside = build_repo_dir_listing(&repo.cwd(), "node_modules", true).unwrap();
+        assert_eq!(names(&inside), vec!["pkg"]);
+        assert!(entry(&inside, "pkg").ignored);
+        assert!(build_repo_dir_listing(&repo.cwd(), "node_modules", false)
+            .unwrap()
+            .entries
+            .is_empty());
+    }
+
+    #[test]
+    fn tracked_paths_under_ignore_rules_are_not_ignored() {
+        let repo = hermetic("tracked-ignored");
+        // Committed before the rule exists: a build output checked in on purpose.
+        repo.write("build/keep.txt", "k");
+        repo.git(&["add", "build/keep.txt"]);
+        repo.git(&["commit", "-q", "-m", "keep"]);
+        repo.write(".gitignore", "build/\n*.log\n");
+        repo.write("build/out.bin", "o");
+        repo.write("forced.log", "f");
+        repo.git(&["add", ".gitignore"]);
+        repo.git(&["add", "-f", "forced.log"]);
+        repo.git(&["commit", "-q", "-m", "rules"]);
+
+        let root = build_repo_dir_listing(&repo.cwd(), "", false).unwrap();
+        assert!(
+            !entry(&root, "build").ignored,
+            "a directory holding a tracked file is not ignored"
+        );
+        assert!(
+            !entry(&root, "forced.log").ignored,
+            "a force-added file is not ignored"
+        );
+
+        let build = build_repo_dir_listing(&repo.cwd(), "build", true).unwrap();
+        assert!(!entry(&build, "keep.txt").ignored);
+        assert!(entry(&build, "out.bin").ignored);
+        assert_eq!(
+            names(&build_repo_dir_listing(&repo.cwd(), "build", false).unwrap()),
+            vec!["keep.txt"]
+        );
+    }
+
+    #[test]
+    fn git_dir_is_never_listed() {
+        let repo = hermetic("gitdir");
+        repo.write("a.txt", "");
+        let root = build_repo_dir_listing(&repo.cwd(), "", true).unwrap();
+        assert!(!names(&root).contains(&".git"));
+        assert_eq!(
+            build_repo_dir_listing(&repo.cwd(), ".git", true).unwrap_err(),
+            "Refusing to list inside .git: .git"
+        );
+        let err = build_repo_dir_listing(&repo.cwd(), ".git/refs", true).unwrap_err();
+        assert!(err.starts_with("Refusing to list inside .git"), "{err}");
+    }
+
+    #[test]
+    fn a_nested_repository_is_a_plain_directory_whose_git_dir_is_skipped() {
+        let repo = hermetic("nested");
+        repo.write("nested/inner.txt", "i");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path.join("nested"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let root = build_repo_dir_listing(&repo.cwd(), "", false).unwrap();
+        let nested = entry(&root, "nested");
+        assert_eq!((nested.kind.as_str(), nested.ignored), ("dir", false));
+        let inside = build_repo_dir_listing(&repo.cwd(), "nested", false).unwrap();
+        assert_eq!(names(&inside), vec!["inner.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_reported_and_never_followed() {
+        let repo = hermetic("symlink");
+        repo.write("real/file.txt", "r");
+        std::os::unix::fs::symlink(repo.path.join("real"), repo.path.join("link-in")).unwrap();
+        std::os::unix::fs::symlink(std::env::temp_dir(), repo.path.join("link-out")).unwrap();
+
+        let root = build_repo_dir_listing(&repo.cwd(), "", false).unwrap();
+        assert_eq!(names(&root), vec!["real", "link-in", "link-out"]);
+        for n in ["link-in", "link-out"] {
+            let e = entry(&root, n);
+            assert_eq!((e.kind.as_str(), e.size), ("symlink", 0), "{n}");
+        }
+        let err = build_repo_dir_listing(&repo.cwd(), "link-out", false).unwrap_err();
+        assert!(err.contains("path escapes cwd"), "{err}");
+    }
+
+    #[test]
+    fn caps_a_directory_at_5000_entries() {
+        let repo = hermetic("cap");
+        let big = repo.path.join("big");
+        std::fs::create_dir_all(&big).unwrap();
+        for i in 0..=MAX_REPO_DIR_ENTRIES {
+            std::fs::write(big.join(format!("f{:05}.txt", i)), "").unwrap();
+        }
+        let l = build_repo_dir_listing(&repo.cwd(), "big", false).unwrap();
+        assert!(l.truncated);
+        assert_eq!(l.entries.len(), MAX_REPO_DIR_ENTRIES);
+        assert_eq!(l.entries.last().unwrap().name, "f04999.txt");
+
+        std::fs::remove_file(big.join("f05000.txt")).unwrap();
+        let exact = build_repo_dir_listing(&repo.cwd(), "big", false).unwrap();
+        assert!(!exact.truncated, "exactly 5,000 entries is not truncated");
+        assert_eq!(exact.entries.len(), MAX_REPO_DIR_ENTRIES);
+    }
+
+    #[test]
+    fn refuses_paths_that_escape_the_repo() {
+        let repo = hermetic("escape");
+        repo.write("src/a.rs", "");
+        for dir in ["..", "../..", "src/../.."] {
+            let err = build_repo_dir_listing(&repo.cwd(), dir, false).unwrap_err();
+            assert!(err.contains("path escapes cwd"), "{dir}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_missing_directory_or_a_file_is_reported_plainly() {
+        let repo = hermetic("missing");
+        repo.write("a.txt", "");
+        assert_eq!(
+            build_repo_dir_listing(&repo.cwd(), "gone", false).unwrap_err(),
+            "Directory not found: gone"
+        );
+        assert_eq!(
+            build_repo_dir_listing(&repo.cwd(), "a.txt", false).unwrap_err(),
+            "Not a directory: a.txt"
+        );
+    }
+
+    #[test]
+    fn names_with_spaces_and_unicode_round_trip() {
+        let repo = hermetic("space é");
+        repo.write("docs/guide one.md", "g");
+        repo.write("café.txt", "c");
+        let root = build_repo_dir_listing(&repo.cwd(), "", false).unwrap();
+        assert_eq!(names(&root), vec!["docs", "café.txt"]);
+        let docs = build_repo_dir_listing(&repo.cwd(), "docs", false).unwrap();
+        assert_eq!(entry(&docs, "guide one.md").path, "docs/guide one.md");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn names_that_are_not_utf8_are_skipped() {
+        use std::os::unix::ffi::OsStrExt;
+        let repo = hermetic("non-utf8");
+        repo.write("ok.txt", "");
+        let bad = std::ffi::OsStr::from_bytes(b"bad\xff.txt");
+        std::fs::write(repo.path.join(bad), "").unwrap();
+        let l = build_repo_dir_listing(&repo.cwd(), "", false).unwrap();
+        assert_eq!(names(&l), vec!["ok.txt"]);
+    }
+
+    #[test]
+    fn rejects_empty_cwd() {
+        assert_eq!(
+            build_repo_dir_listing("", "", false).unwrap_err(),
+            "cwd must not be empty"
+        );
+    }
+
+    /// Perf sanity, not a benchmark. Run with
+    /// `cargo test list_repo_dir_perf -- --ignored`. The spec measured 66 ms in
+    /// release for this shape; the bound is 15x that, so neither a debug build
+    /// nor a loaded CI box can flake it.
+    #[test]
+    #[ignore = "perf sanity: run explicitly with --ignored"]
+    fn list_repo_dir_perf_6000_files_under_one_second() {
+        let repo = hermetic("perf");
+        repo.write(".gitignore", "*.tmp\n");
+        let big = repo.path.join("big");
+        std::fs::create_dir_all(&big).unwrap();
+        for i in 0..6_000 {
+            let ext = if i % 3 == 0 { "tmp" } else { "txt" };
+            std::fs::write(big.join(format!("f{:05}.{}", i, ext)), "").unwrap();
+        }
+        let start = std::time::Instant::now();
+        let l = build_repo_dir_listing(&repo.cwd(), "big", true).unwrap();
+        let elapsed = start.elapsed();
+        assert!(l.truncated);
+        assert_eq!(l.entries.len(), MAX_REPO_DIR_ENTRIES);
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "listing took {elapsed:?}"
+        );
     }
 }

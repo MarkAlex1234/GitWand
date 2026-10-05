@@ -52,8 +52,21 @@ export function useVirtualRows(opts: UseVirtualRowsOptions) {
     { immediate: true },
   );
 
-  const virtualItems = computed(() => virtualizer.value?.getVirtualItems() ?? []);
-  const totalSize = computed(() => virtualizer.value?.getTotalSize() ?? 0);
+  // `setOptions` (above) mutates the Virtualizer in place and does NOT trigger
+  // the `virtualizer` shallowRef — only scroll/measure `onChange` does. So a
+  // bare `virtualizer.value.getVirtualItems()` would stay cached at its first
+  // value when only `count` changes. Reading `opts.count.value` makes `count`
+  // an explicit dependency. No `_willUpdate()`/`measure()` is needed: in
+  // virtual-core, getMeasurements/calculateRange/getVirtualIndexes are memos
+  // keyed on `options.count`, so they recompute on the next read.
+  const virtualItems = computed(() => {
+    void opts.count.value;
+    return virtualizer.value?.getVirtualItems() ?? [];
+  });
+  const totalSize = computed(() => {
+    void opts.count.value;
+    return virtualizer.value?.getTotalSize() ?? 0;
+  });
 
   /** Ref callback — attach to each rendered row's root element. */
   function measure(el: Element | null) {

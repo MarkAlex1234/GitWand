@@ -19,9 +19,12 @@
  */
 
 import { describe, it, beforeAll, afterAll, expect } from "vitest";
+import { existsSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { startDevServer } from "./dev-server-runner.mjs";
 import { assertParity } from "./harness.mjs";
-import { fixtureDiff, fixtureUntrackedDirs } from "./fixtures.mjs";
+import { runProbe } from "./probe.mjs";
+import { commitFile, fixtureDiff, fixtureUntrackedDirs, mkTempRepo } from "./fixtures.mjs";
 
 describe("parity: git-diff", () => {
   /** @type {Awaited<ReturnType<typeof startDevServer>>} */
@@ -125,6 +128,179 @@ describe("parity: git-diff", () => {
 
       expect(rust.hunks).toEqual([]);
       expect(node.hunks).toEqual([]);
+    });
+  });
+
+  // The untracked fallback runs `git diff --no-index -- /dev/null <path>`,
+  // which reads any file it is handed. Neither backend validated `path`, so
+  // `../secret` rendered a file outside the repository.
+  describe("path boundary", () => {
+    const SECRET = "outside-secret-content";
+
+    it("a `../` or absolute path outside the repo is refused by both, with the same message", async () => {
+      const cwd = mkTempRepo("gw-parity-diff-escape-");
+      commitFile(cwd, "a.txt", "a\n", "init", 0);
+      const outside = join(cwd, "..", `${basename(cwd)}-outside.txt`);
+      writeFileSync(outside, `${SECRET}\n`);
+      try {
+        for (const path of [`../${basename(outside)}`, outside]) {
+          const rust = runProbe("git-diff", { cwd, path, staged: false });
+          const res = await dev.fetch(
+            `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}&staged=false`,
+          );
+          const node = await res.json();
+
+          expect(rust.ok, `rust must not diff ${path}`).toBe(false);
+          expect(res.status, `node must refuse ${path}`).toBe(400);
+          expect(rust.error).toMatch(/^path escapes cwd/);
+          expect(node.error).toBe(rust.error);
+          expect(JSON.stringify(node)).not.toContain(SECRET);
+        }
+      } finally {
+        rmSync(outside, { force: true });
+      }
+    });
+
+    /** Rust and Node on the same path: both must refuse, with one message. */
+    async function bothRefuse(cwd, path) {
+      const rust = runProbe("git-diff", { cwd, path, staged: false });
+      const res = await dev.fetch(
+        `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}&staged=false`,
+      );
+      const node = await res.json();
+      expect(rust.ok, `rust must refuse ${path}`).toBe(false);
+      expect(res.status, `node must refuse ${path}`).toBe(400);
+      expect(node.error, path).toBe(rust.error);
+      expect(JSON.stringify(node)).not.toContain(SECRET);
+      return rust.error;
+    }
+
+    // `linkdir/..` is the parent of the link's TARGET. Folding `..` lexically
+    // judged `linkdir/../secret` as the repo's own `secret`, then handed the
+    // raw path to `git diff --no-index`, which followed the link and read the
+    // file outside.
+    it("`..` after a symlink leading outside is refused by both", async () => {
+      const cwd = mkTempRepo("gw-parity-diff-linkdotdot-");
+      commitFile(cwd, "a.txt", "a\n", "init", 0);
+      const out = `${cwd}-out`;
+      mkdirSync(join(out, "sub"), { recursive: true });
+      writeFileSync(join(out, "secret"), `${SECRET}\n`);
+      writeFileSync(join(cwd, "secret"), "in-repo\n");
+      symlinkSync(join(out, "sub"), join(cwd, "linkdir"));
+      try {
+        for (const path of ["linkdir/../secret", "linkdir/newfile"]) {
+          expect(await bothRefuse(cwd, path)).toMatch(/^path escapes cwd/);
+        }
+      } finally {
+        rmSync(out, { recursive: true, force: true });
+      }
+    });
+
+    it("paths below a dangling or looping symlink are refused by both", async () => {
+      const cwd = mkTempRepo("gw-parity-diff-dangling-");
+      commitFile(cwd, "a.txt", "a\n", "init", 0);
+      symlinkSync(join(`${cwd}-nowhere`, "x"), join(cwd, "dangling"));
+      symlinkSync(join(cwd, "loop"), join(cwd, "loop"));
+      for (const path of ["dangling/x", "loop/x"]) {
+        expect(await bothRefuse(cwd, path)).toMatch(/^path does not resolve: .* \(dangling, looping or unreadable component\)$/);
+      }
+    });
+
+    it("`..` below a missing directory is refused by both, with the same message", async () => {
+      const cwd = mkTempRepo("gw-parity-diff-missingdotdot-");
+      commitFile(cwd, "a.txt", "a\n", "init", 0);
+      for (const path of ["gone/../a.txt", "missing/../../x"]) {
+        expect(await bothRefuse(cwd, path)).toBe(
+          `path does not resolve: ${cwd}/${path} (\`..\` below a missing directory)`,
+        );
+      }
+    });
+
+    it("`./x` diffs like `x`, and the repository root is refused by both", async () => {
+      const cwd = fixtureDiff();
+      const { rust } = await assertParity(dev, {
+        command: "git-diff",
+        args: { cwd, path: "./a.txt", staged: false },
+        httpPath: `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent("./a.txt")}&staged=false`,
+      });
+      expect(rust.hunks).toHaveLength(1);
+      for (const path of [".", "./"]) {
+        expect(await bothRefuse(cwd, path)).toBe("path must not be the repository root");
+      }
+    });
+
+    it("a deleted file whose folder is now a regular file still diffs identically", async () => {
+      const cwd = mkTempRepo("gw-parity-diff-notdir-");
+      commitFile(cwd, "secret/x", "gone\n", "init", 0);
+      rmSync(join(cwd, "secret"), { recursive: true });
+      writeFileSync(join(cwd, "secret"), "now a file\n");
+      const { rust } = await assertParity(dev, {
+        command: "git-diff",
+        args: { cwd, path: "secret/x", staged: false },
+        httpPath: `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent("secret/x")}&staged=false`,
+      });
+      expect(rust.hunks).toHaveLength(1);
+
+      // A symlink to a file in that position is not a regular file: refused.
+      symlinkSync(join(cwd, "secret"), join(cwd, "inlink"));
+      expect(await bothRefuse(cwd, "inlink/x")).toMatch(
+        /^path does not resolve: .* \(dangling, looping or unreadable component\)$/,
+      );
+    });
+
+    // The cwd as the caller spells it may differ from the on-disk name (letter
+    // case, or NFC vs NFD on macOS). Both sides must canonicalize it the same
+    // way as the paths below it, or every in-repo path looks like an escape.
+    describe("a cwd spelled differently from the disk", () => {
+      /** Rename the repo dir to `onDisk`, return the cwd spelled `given`. */
+      function respell(cwd, onDisk, given) {
+        const disk = join(dirname(cwd), onDisk);
+        renameSync(cwd, disk);
+        return join(dirname(cwd), given);
+      }
+
+      for (const [label, onDisk, given] of [
+        ["letter case", "Repo-case", "REPO-CASE"],
+        ["NFC vs NFD", "d\u0065\u0301p-norm", "d\u00e9p-norm"],
+      ]) {
+        it(`${label}: in-repo paths are accepted, escapes still refused`, async (ctx) => {
+          const base = mkTempRepo("gw-parity-diff-spelling-");
+          commitFile(base, "a.txt", "a\n", "init", 0);
+          writeFileSync(join(base, "a.txt"), "A\n");
+          const cwd = respell(base, `${basename(base)}-${onDisk}`, `${basename(base)}-${given}`);
+          // Only meaningful on a filesystem that folds the two spellings.
+          if (!existsSync(join(cwd, "a.txt"))) return ctx.skip();
+          const { rust, node } = await assertParity(dev, {
+            command: "git-diff",
+            args: { cwd, path: "a.txt", staged: false },
+            httpPath: `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=a.txt&staged=false`,
+          });
+          expect(rust.hunks).toHaveLength(1);
+          expect(node.hunks).toHaveLength(1);
+          const outside = join(dirname(cwd), `${basename(base)}-outside.txt`);
+          writeFileSync(outside, `${SECRET}\n`);
+          try {
+            expect(await bothRefuse(cwd, `../${basename(outside)}`)).toMatch(/^path escapes cwd/);
+          } finally {
+            rmSync(outside, { force: true });
+          }
+        });
+      }
+    });
+
+    it("a deleted file whose directory is gone still diffs identically", async () => {
+      const cwd = mkTempRepo("gw-parity-diff-deleted-");
+      commitFile(cwd, "old/deep/gone.txt", "bye\n", "init", 0);
+      rmSync(join(cwd, "old"), { recursive: true });
+      const { rust, node } = await assertParity(dev, {
+        command: "git-diff",
+        args: { cwd, path: "old/deep/gone.txt", staged: false },
+        httpPath: `/api/git-diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent("old/deep/gone.txt")}&staged=false`,
+      });
+      for (const side of [rust, node]) {
+        expect(side.hunks).toHaveLength(1);
+        expect(side.hunks[0].lines.every((l) => l.type === "delete")).toBe(true);
+      }
     });
   });
 });

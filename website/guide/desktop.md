@@ -94,6 +94,19 @@ The file list on the right of the commit diff has a **flat ↔ tree** toggle. Tr
 
 The backing `folder_diff` backend command (Rust/Tauri + Node dev-server + TypeScript wrapper) builds the aggregated tree.
 
+## File Explorer (v3.11.2)
+
+The **Files** tile in the dock opens the File Explorer, with the working tree on the left and your open files on the right. You can also open it from the command palette (**Toggle File Explorer**) and, on macOS, the **View** menu. It can float, dock at the bottom or go full-screen.
+
+- **Status at a glance.** Changed files carry a letter (M, A, D, R, U, C), and every folder above a change carries a count, even a folder you have not opened. Deleted files stay in place, struck through.
+- **Ignored files on demand.** They are hidden by default. **Show ignored** shows them greyed out, and they are still loaded one folder at a time. A folder lists its first 5,000 entries.
+- **Keyboard.** Use ↑ ↓ to move. → expands a folder and then steps into it, and ← collapses it and then climbs to the parent. Enter opens a file in the preview tab or toggles a folder, and a double click pins the tab. Home and End jump to the ends, and you can type the start of a name to jump to it. ⇧F10 opens the context menu.
+- **Diff or file.** A changed file opens on its inline diff, with a **Working tree | Index** switch when it is both staged and modified. **Diff | File** in the toolbar switches to the editor, where you can edit, save and show blame. The diff always shows the file on disk, so **Diff** is available again once you save. Unchanged files open in the editor. A conflicted file offers **Open in merge editor**.
+- **Context menu.** On a file: **Open in editor**, **Copy path** and **Reveal in Finder**. On a folder: **Scope here**, which narrows the app to that folder and re-roots the tree (**Whole repo** goes back), **Copy path** and **Reveal**.
+- **Live.** The tree and an open diff follow changes on disk through the Live Repo watcher.
+
+Staging stays in **Changes**.
+
 ## File History & Blame
 
 - Full file history with `git log --follow`

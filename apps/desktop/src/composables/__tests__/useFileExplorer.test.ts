@@ -133,6 +133,87 @@ describe("useFileExplorer", () => {
   });
 });
 
+describe("useFileExplorer.reloadTab (v3.11.2)", () => {
+  const REPO = "/repo/reload";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useFileExplorer().disposeRepo(REPO);
+  });
+
+  it("re-reads a clean tab from disk", async () => {
+    const explorer = useFileExplorer();
+    const tab = await explorer.openTab(REPO, REPO, "a.ts", true);
+    vi.mocked(readFile).mockResolvedValueOnce("changed on disk");
+    expect(await explorer.reloadTab(REPO, REPO, tab.id)).toBe(true);
+    expect(tab.content).toBe("changed on disk");
+    expect(explorer.isDirty(tab)).toBe(false);
+  });
+
+  it("reports no change when the disk matches the buffer", async () => {
+    const explorer = useFileExplorer();
+    const tab = await explorer.openTab(REPO, REPO, "a.ts", true);
+    expect(await explorer.reloadTab(REPO, REPO, tab.id)).toBe(false);
+    expect(tab.content).toBe("content of a.ts");
+  });
+
+  it("never touches a dirty tab", async () => {
+    const explorer = useFileExplorer();
+    const tab = await explorer.openTab(REPO, REPO, "a.ts", true);
+    explorer.updateContent(REPO, tab.id, "my edit");
+    vi.mocked(readFile).mockClear();
+    expect(await explorer.reloadTab(REPO, REPO, tab.id)).toBe(false);
+    expect(readFile).not.toHaveBeenCalled();
+    expect(tab.content).toBe("my edit");
+  });
+
+  it("drops a read that lands after the user typed", async () => {
+    const explorer = useFileExplorer();
+    const tab = await explorer.openTab(REPO, REPO, "a.ts", true);
+    let land!: (v: string) => void;
+    vi.mocked(readFile).mockImplementationOnce(() => new Promise<string>((r) => { land = r; }));
+    const pending = explorer.reloadTab(REPO, REPO, tab.id);
+    explorer.updateContent(REPO, tab.id, "typed meanwhile");
+    land("disk");
+    expect(await pending).toBe(false);
+    expect(tab.content).toBe("typed meanwhile");
+    expect(tab.originalContent).toBe("content of a.ts");
+  });
+
+  it("keeps the buffer when the read fails", async () => {
+    const explorer = useFileExplorer();
+    const tab = await explorer.openTab(REPO, REPO, "a.ts", true);
+    vi.mocked(readFile).mockRejectedValueOnce(new Error("gone"));
+    expect(await explorer.reloadTab(REPO, REPO, tab.id)).toBe(false);
+    expect(tab.content).toBe("content of a.ts");
+    expect(tab.binary).toBe(false);
+  });
+
+  it("ignores a read that lands after the tab was closed", async () => {
+    const explorer = useFileExplorer();
+    const tab = await explorer.openTab(REPO, REPO, "a.ts", true);
+    let land!: (v: string) => void;
+    vi.mocked(readFile).mockImplementationOnce(() => new Promise<string>((r) => { land = r; }));
+    const pending = explorer.reloadTab(REPO, REPO, tab.id);
+    explorer.closeTab(REPO, tab.id);
+    land("disk");
+    expect(await pending).toBe(false);
+    expect(explorer.tabsFor(REPO)).toEqual([]);
+  });
+
+  it("ignores a read that lands after the repo was disposed", async () => {
+    const explorer = useFileExplorer();
+    const tab = await explorer.openTab(REPO, REPO, "a.ts", true);
+    let land!: (v: string) => void;
+    vi.mocked(readFile).mockImplementationOnce(() => new Promise<string>((r) => { land = r; }));
+    const pending = explorer.reloadTab(REPO, REPO, tab.id);
+    explorer.disposeRepo(REPO);
+    land("disk");
+    expect(await pending).toBe(false);
+    expect(tab.content).toBe("content of a.ts");
+  });
+});
+
 describe("resolveFileExplorerShortcut", () => {
   it("returns null when not focused", () => {
     const e = new KeyboardEvent("keydown", { key: "s", metaKey: true });
