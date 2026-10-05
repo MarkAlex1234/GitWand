@@ -277,6 +277,9 @@ function closeMenu(refocus = true): void {
   if (refocus) scrollEl.value?.focus();
 }
 
+/** The tree's single tab stop, for a parent whose focused control just went away. */
+defineExpose({ focus: () => scrollEl.value?.focus() });
+
 function onOutside(e: PointerEvent): void {
   if (!(e.target as HTMLElement | null)?.closest?.(".ftp-menu")) closeMenu(false);
 }

@@ -514,6 +514,18 @@ describe("FileExplorerPanel — scope (v3.11.2)", () => {
     expect(container.querySelector(".fe__scope")).toBeNull();
   });
 
+  it("'Whole repo' hands focus to the tree, since the button it was on is gone", async () => {
+    useWorkspaceScope().activeScope.value = "lib";
+    mountPanel();
+    await settle();
+    const button = [...container.querySelectorAll<HTMLButtonElement>(".fe__scope button")]
+      .find((b) => b.textContent?.trim() === en.scope.wholeRepo)!;
+    button.focus();
+    button.click();
+    await settle();
+    expect(document.activeElement).toBe(container.querySelector("[role=tree]"));
+  });
+
   it("falls back to the whole repo, with a notice, when the scope folder is gone", async () => {
     useWorkspaceScope().activeScope.value = "gone";
     mountPanel();

@@ -48,6 +48,14 @@ const changedFilesRef = toRef(props, "changedFiles");
 // active. The panel lives in a KeepAlive and is not remounted on a repo
 // switch: the tree and the scope check both follow `repoPath` instead.
 const scope = useTreeScopeRoot(repoPathRef);
+const treePane = ref<InstanceType<typeof FileTreePane> | null>(null);
+
+/** "Whole repo" removes its own button, so focus would fall to the body. */
+async function onWholeRepo(): Promise<void> {
+  await scope.wholeRepo();
+  await nextTick();
+  treePane.value?.focus();
+}
 const tree = useLazyRepoTree({
   repoPath: repoPathRef,
   root: scope.root,
@@ -699,12 +707,13 @@ function onKeyDown(e: KeyboardEvent) {
       <div class="fe__tree-col">
         <div v-if="scope.root.value" class="fe__scope" role="group" :aria-label="t('scope.picker')">
           <span class="fe__scope-path mono" :title="scope.root.value">{{ t('scope.active', scope.root.value) }}</span>
-          <button type="button" class="fe__action-btn" @click="scope.wholeRepo()">{{ t('scope.wholeRepo') }}</button>
+          <button type="button" class="fe__action-btn" @click="onWholeRepo">{{ t('scope.wholeRepo') }}</button>
         </div>
         <p v-if="scope.goneScope.value" class="fe__scope-notice" role="status">
           {{ t('filesView.scopeGone', scope.goneScope.value) }}
         </p>
         <FileTreePane
+          ref="treePane"
           class="fe__tree"
           :rows="tree.rows.value"
           :selected-path="tree.selected.value"
