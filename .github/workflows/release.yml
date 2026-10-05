@@ -393,10 +393,15 @@ jobs:
   # ProductCode from the actual MSI, and opens the PR from the fork tied to
   # the token.
   #
-  # Requires secret WINGET_TOKEN: a PAT (classic `public_repo`, or fine-grained
-  # with Contents: read+write on the devlint/winget-pkgs fork) used by
-  # wingetcreate to push the manifest branch and open the PR. When the secret
-  # is absent the job skips with a warning instead of failing the release.
+  # Requires secret WINGET_TOKEN: a classic PAT with `public_repo` and
+  # `workflow`, owned by the account whose winget-pkgs fork carries the PR.
+  # wingetcreate pushes the manifest branch to that fork and opens the PR on
+  # microsoft/winget-pkgs, a repository the token's owner does not own, which
+  # is why its docs ask for a classic token. `workflow` is needed to sync the
+  # fork: whenever upstream has changed a GitHub workflow since the last sync,
+  # GitHub refuses the sync without it (v3.11.2 failed exactly there). When
+  # the secret is absent the job skips with a warning instead of failing the
+  # release.
   publish-winget:
     name: Publish to winget
     needs: release
@@ -433,14 +438,42 @@ jobs:
             exit 1
           }
 
+          # Sync the token owner's fork with upstream before wingetcreate runs.
+          # wingetcreate tries too, but only reports "could not be synced",
+          # without the cause. Done here, a refusal names the missing scope.
+          $ghToken = $env:GH_TOKEN
+          $env:GH_TOKEN = $env:WINGET_TOKEN
+          try {
+            $owner = gh api user --jq .login
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::WINGET_TOKEN cannot read its own user — the token is invalid or expired."
+              exit 1
+            }
+            $sync = gh api -X POST "repos/$owner/winget-pkgs/merge-upstream" -f branch=master 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Could not sync $owner/winget-pkgs with microsoft/winget-pkgs: $sync"
+              Write-Host "::error::If upstream changed a workflow, WINGET_TOKEN needs the 'workflow' scope (classic PAT). Or click 'Sync fork' on github.com/$owner/winget-pkgs, then re-run this job."
+              exit 1
+            }
+            Write-Host "::notice::Synced $owner/winget-pkgs with upstream"
+          } finally {
+            $env:GH_TOKEN = $ghToken
+          }
+
           # Self-contained wingetcreate (no winget needed on the runner)
           Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
 
+          # $ErrorActionPreference does not cover a native exe's exit code, so
+          # without this check a failed submission still printed "Submitted".
           .\wingetcreate.exe update Devlint.GitWand `
             --version $version `
             --urls $msiUrl `
             --submit `
             --token $env:WINGET_TOKEN
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::wingetcreate failed (exit $LASTEXITCODE) — Devlint.GitWand $version was not submitted."
+            exit $LASTEXITCODE
+          }
           Write-Host "::notice::Submitted Devlint.GitWand $version to microsoft/winget-pkgs"
 
   # Publish gitwand-bin to the Arch User Repository.
